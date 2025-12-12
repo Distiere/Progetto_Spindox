@@ -1,0 +1,6 @@
+duckdb
+polars
+pandas
+prefect
+streamlit
+python-dotenv
