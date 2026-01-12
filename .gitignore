@@ -1,4 +1,17 @@
+# --- Dati e Database (Fondamentale) ---
 data/
+warehouse.duckdb
+warehouse.duckdb.wal
+
+# --- Sicurezza ---
 .env
+
+# --- Python & Ambiente (Fondamentale) ---
 __pycache__/
+.venv/
+venv/
+*.pyc
+
+# --- Strumenti ---
 .prefect/
+.DS_Store

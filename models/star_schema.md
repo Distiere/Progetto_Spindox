@@ -186,22 +186,6 @@ Localizzazione geografica / amministrativa dell’incidente.
 
 ---
 
-### 4.5 *(Opzionale)* `dim_detection_and_protection`
-
-Se vuoi estendere il modello per coprire la prevenzione e i dispositivi antincendio, puoi creare una dimensione separata, ma per il core del progetto **non è strettamente necessario**.
-
-Eventuali colonne:
-
-- `detectors_present` ← `DetectorsPresent`  
-- `detector_type` ← `DetectorType`  
-- `detector_operation` ← `DetectorOperation`  
-- `detector_effectiveness` ← `DetectorEffectiveness`  
-- `detector_alerted_occupants` ← `DetectorAlertedOccupants`  
-- `automatic_ext_system_present` ← `AutomaticExtinguishingSystemPresent`  
-- `automatic_ext_system_type` ← `AutomaticExtinguishingSytemType`  
-- `automatic_ext_system_performance` ← `AutomaticExtinguishingSytemPerfomance`  
-
----
 
 ## 5. Mappatura Domande → KPI → Tabelle
 
