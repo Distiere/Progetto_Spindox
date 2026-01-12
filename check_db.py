@@ -20,4 +20,28 @@ print("\nROW COUNTS:")
 print("calls:", con.execute("SELECT COUNT(*) FROM bronze.calls").fetchone()[0])
 print("incidents:", con.execute("SELECT COUNT(*) FROM bronze.incidents").fetchone()[0])
 
+print("silver.calls_clean:", con.execute("SELECT COUNT(*) FROM silver.calls_clean").fetchone()[0])
+print("silver.incidents_clean:", con.execute("SELECT COUNT(*) FROM silver.incidents_clean").fetchone()[0])
+print("null response_time_sec:",
+      con.execute("SELECT COUNT(*) FROM silver.calls_clean WHERE response_time_sec IS NULL").fetchone()[0])
+
+
+#-- 1) Quanti casi hanno timestamp mancanti?
+null_timestamps = con.execute("""
+            SELECT
+                SUM(CASE WHEN received_ts IS NULL THEN 1 ELSE 0 END) AS null_received,
+                SUM(CASE WHEN on_scene_ts IS NULL THEN 1 ELSE 0 END) AS null_on_scene,
+                SUM(CASE WHEN dispatch_ts IS NULL THEN 1 ELSE 0 END) AS null_dispatch
+            FROM silver.calls_clean;""")
+print("Null Timestamps:", null_timestamps.fetchall())
+
+#-- 2) quanti response_time negativi
+neg_response = con.execute("""
+SELECT COUNT(*) AS negative_resp
+FROM silver.calls_clean
+WHERE response_time_sec < 0;
+""")
+print("Negative response_time_sec:", neg_response.fetchall())
+
+
 con.close()

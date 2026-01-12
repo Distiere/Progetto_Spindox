@@ -2,6 +2,8 @@ from prefect import flow
 import polars as pl
 
 from etl.tasks.bronze import ingest_bronze
+from etl.tasks.silver import clean_silver
+
 
 CALLS_CSV = "data/raw/Fire_Department_Calls_for_Service.csv"
 INCIDENTS_CSV = "data/raw/Fire_Incidents.csv"
@@ -33,6 +35,8 @@ def main_flow():
         schema_overrides=None
     )
 
+    # 3) Silver - Cleaning
+    clean_silver()
     print("Pipeline completata con successo!")
 
 if __name__ == "__main__":

@@ -24,13 +24,13 @@ lf_2 = pl.scan_csv(
     infer_schema=False,
 )
 
-cols = lf_2.collect_schema().names()
+cols_2 = lf_2.collect_schema().names()
 
-print(f"Numero colonne: {len(cols)}\n")
-for c in cols:
+print(f"Numero colonne: {len(cols_2)}\n")
+for c in cols_2:
     print(c)
 
 with open("columns_calls_CSV_2.txt", "w") as f:
-    for c in lf.columns:
+    for c in lf_2.columns:
         f.write(c + "\n")
 
