@@ -2,7 +2,7 @@ import duckdb
 from contextlib import contextmanager
 
 # Costanti di progetto
-DB_PATH = "warehouse.duckdb"
+DB_PATH = "data/warehouse.duckdb"
 
 class Schemas:
     BRONZE = "bronze"

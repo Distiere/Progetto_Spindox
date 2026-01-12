@@ -4,3 +4,4 @@ pandas
 prefect
 streamlit
 python-dotenv
+matplotlib
