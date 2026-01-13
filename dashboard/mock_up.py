@@ -258,7 +258,7 @@ with tab_geo:
 with tab_sev:
     st.subheader("Severity (Incidents) — metriche di danno e vittime")
 
-    # Subquery: incidenti distinti dalle CALLS con gli stessi filtri (evita duplicazioni)
+    # Subquery: incidenti distinti dalle CALLS con gli stessi filtri
     sev = q(f"""
         WITH calls_filtered AS (
           SELECT DISTINCT
@@ -343,7 +343,7 @@ with tab_sev:
     st.pyplot(fig2)
 
 # -----------------------------
-# (Optional) data preview
+# data preview
 # -----------------------------
 with st.expander("Anteprima dati (calls)"):
     sample = q(f"SELECT * FROM {BASE_CALLS} {where_calls} LIMIT 50")
