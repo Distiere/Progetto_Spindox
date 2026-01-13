@@ -6,6 +6,8 @@ from tasks.silver import clean_silver
 from test.gate import validate_silver_quality
 from tasks.gold import build_dim_date, build_dim_incident_type, build_dim_location, build_fact_incident
 from test.gate_gold import validate_gold_quality
+from tasks.kpi_gold_view import create_kpi_views
+
 
 
 CALLS_CSV = "data/raw/Fire_Department_Calls_for_Service.csv"
@@ -52,8 +54,11 @@ def main_flow():
     
     # 6) GOLD - fact
     build_fact_incident()
-    
-    # 7) GOLD - quality gate
+
+    # 7) GOLD - KPI views
+    create_kpi_views()
+
+    # 8) GOLD - quality gate
     validate_gold_quality()
 
     print("Pipeline completata con successo.")

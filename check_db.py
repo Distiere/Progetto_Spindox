@@ -55,5 +55,11 @@ print("Gold dim_incident_type count and sample:", check_dim_incident_type.fetcha
 check_dim_location = con.execute("""SELECT COUNT(*) FROM gold.dim_location;
 SELECT * FROM gold.dim_location LIMIT 10;
 """)
+print("Gold dim_location count and sample:", check_dim_location.fetchall())
 
+
+check_fact_incidents = con.execute("""SELECT COUNT(*) FROM gold.fact_incident;
+SELECT * FROM gold.fact_incident LIMIT 10;
+                                   """)
+print("Gold fact_incident count and sample:", check_fact_incidents.fetchall())
 con.close()
