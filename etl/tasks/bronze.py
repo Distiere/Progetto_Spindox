@@ -28,7 +28,7 @@ def ingest_bronze(source_path: str, table_name: str, schema_overrides: dict | No
     logger = get_run_logger()
     full_table_name = f"{Schemas.BRONZE}.{table_name}"
 
-    logger.info(f"🚀 Avvio ingestione Bronze per: {table_name}")
+    logger.info(f"Avvio ingestione Bronze per: {table_name}")
     logger.info(f"   Source: {source_path}")
 
     try:
@@ -62,7 +62,7 @@ def ingest_bronze(source_path: str, table_name: str, schema_overrides: dict | No
 
             row_count = con.execute(f"SELECT COUNT(*) FROM {full_table_name}").fetchone()[0]
 
-        logger.info(f"✅ Completato {table_name}. Righe: {row_count:,}")
+        logger.info(f"Completato {table_name}. Righe: {row_count:,}")
         return int(row_count)
 
     except Exception as e:

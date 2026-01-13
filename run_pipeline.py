@@ -3,14 +3,14 @@ import polars as pl
 
 from etl.tasks.bronze import ingest_bronze
 from etl.tasks.silver import clean_silver
-
+from etl.test.gate import validate_silver_quality
 
 CALLS_CSV = "data/raw/Fire_Department_Calls_for_Service.csv"
 INCIDENTS_CSV = "data/raw/Fire_Incidents.csv"
 
 @flow(name="San Francisco Fire Dept Pipeline", log_prints=True)
 def main_flow():
-    print("🚦 Avvio della Pipeline Dati...")
+    print("Avvio della Pipeline Dati")
 
     # Overrides utili per colonne “miste” (alfanumeriche)
     calls_overrides = {
@@ -37,7 +37,10 @@ def main_flow():
 
     # 3) Silver - Cleaning
     clean_silver()
-    print("Pipeline completata con successo!")
+
+    # 4) Quality Gate su Silver
+    validate_silver_quality(sample_n=200_000)
+    print("Pipeline completata con successo.")   
 
 if __name__ == "__main__":
     main_flow()

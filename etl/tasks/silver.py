@@ -136,7 +136,7 @@ def clean_silver() -> None:
         ;
         """
         con.execute(calls_sql)
-        logger.info("✅ Creato silver.calls_clean")
+        logger.info("Creato silver.calls_clean")
 
         # =========================
         # SILVER: INCIDENTS
@@ -181,13 +181,19 @@ def clean_silver() -> None:
             try_cast(otherunits AS INTEGER) AS other_units,
             try_cast(otherpersonnel AS INTEGER) AS other_personnel,
 
-            try_cast(estimatedpropertyloss AS BIGINT) AS estimated_property_loss,
-            try_cast(estimatedcontentsloss AS BIGINT) AS estimated_contents_loss,
+            CASE
+              WHEN try_cast(estimatedpropertyloss AS BIGINT) < 0 THEN NULL
+              ELSE try_cast(estimatedpropertyloss AS BIGINT)
+            END AS estimated_property_loss,
+            CASE
+              WHEN try_cast(estimatedcontentsloss AS BIGINT) < 0 THEN NULL
+              ELSE try_cast(estimatedcontentsloss AS BIGINT)
+            END AS estimated_contents_loss,
 
-            try_cast(firefatalities AS INTEGER) AS fire_fatalities,
-            try_cast(fireinjuries AS INTEGER) AS fire_injuries,
-            try_cast(civilianfatalities AS INTEGER) AS civilian_fatalities,
-            try_cast(civilianinjuries AS INTEGER) AS civilian_injuries,
+            try_cast(firefatalities AS BIGINT) AS fire_fatalities,
+            try_cast(fireinjuries AS BIGINT) AS fire_injuries,
+            try_cast(civilianfatalities AS BIGINT) AS civilian_fatalities,
+            try_cast(civilianinjuries AS BIGINT) AS civilian_injuries,
 
             -- Type / situation
             primarysituation AS primary_situation,
@@ -235,4 +241,4 @@ def clean_silver() -> None:
         ;
         """
         con.execute(incidents_sql)
-        logger.info("✅ Creato silver.incidents_clean")
+        logger.info("Creato silver.incidents_clean")
