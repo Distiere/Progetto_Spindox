@@ -1,6 +1,6 @@
 import duckdb
 
-con = duckdb.connect("warehouse.duckdb")
+con = duckdb.connect("data/warehouse.duckdb")
 
 print("SCHEMAS:")
 print(
