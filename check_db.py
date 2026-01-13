@@ -43,5 +43,17 @@ WHERE response_time_sec < 0;
 """)
 print("Negative response_time_sec:", neg_response.fetchall())
 
+check_data_gold = con.execute("SELECT MIN(date), MAX(date), COUNT(*) FROM gold.dim_date;")
+print("Gold dim_date data:", check_data_gold.fetchall())
+
+
+check_dim_incident_type = con.execute("""SELECT COUNT(*) FROM gold.dim_incident_type;
+SELECT * FROM gold.dim_incident_type LIMIT 10;
+""")
+print("Gold dim_incident_type count and sample:", check_dim_incident_type.fetchall())
+
+check_dim_location = con.execute("""SELECT COUNT(*) FROM gold.dim_location;
+SELECT * FROM gold.dim_location LIMIT 10;
+""")
 
 con.close()
