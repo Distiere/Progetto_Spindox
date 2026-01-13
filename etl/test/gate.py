@@ -2,7 +2,7 @@ import pandera as pa
 from pandera import Column, Check
 from prefect import task, get_run_logger
 
-from etl.utils import get_db_connection
+from utils import get_db_connection
 
 # -----------------------------
 # Pandera Schemas

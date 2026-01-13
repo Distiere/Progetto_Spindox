@@ -1,5 +1,5 @@
 from prefect import task, get_run_logger
-from etl.utils import get_db_connection, Schemas
+from utils import get_db_connection, Schemas
 
 @task(name="gold_dim_date")
 def build_dim_date() -> None:
