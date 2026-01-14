@@ -1,3 +1,12 @@
+Da repository per avere la pipeline funzionante eseguire i seguenti step 
+ 1)installare in locale requirements.txt
+ 2)avere percorso data/raw/nome_file.csv come dato grezzo locale, altrimenti cambiare Path in run_pipeline
+ 3)eseguire run_pipeline.py per avere la creazione dei layer e view delle kpi
+ 4)fare test di funzionamento tramite streamlit lanciano dashboard/app.py
+ 5)eseguire i comandi sottostanti per prima crezione di immagine podman e successiva run containerizzata
+
 podman build -t sf-fire-dashboard -f podman/dockerfile .
 
-podman run --rm -p 8501:8501 -v ./data:/app/data:ro -e GOOGLE_API_KEY="AIzaSyBEVLMj49WDjBvpKPWudOYTQU6QjKEgFwo" sf-fire-dashboard
+podman run --rm -p 8501:8501 -v ./data:/app/data:ro -e GOOGLE_API_KEY="KEY_DA_INSERIRE" sf-fire-dashboard
+
+ 6) utilizzare query.py se si vuole consultare il db
