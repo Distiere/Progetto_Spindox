@@ -6,3 +6,4 @@ streamlit
 python-dotenv
 matplotlib
 pandera
+google-genai
