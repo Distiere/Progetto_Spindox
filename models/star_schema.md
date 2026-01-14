@@ -244,3 +244,79 @@ Localizzazione geografica / amministrativa dell’incidente.
 - Alcune colonne del dataset originale **non vengono riportate nel gold**, perché:
   - non sono direttamente utili alle analisi
   - aumenterebbero solo la complessità del modello
+
+```mermaid
+erDiagram
+  FACT_INCIDENT }o--|| DIM_DATE : date_id
+  FACT_INCIDENT }o--|| DIM_LOCATION : location_id
+  FACT_INCIDENT }o--|| DIM_INCIDENT_TYPE : incident_type_id
+
+  DIM_DATE {
+    BIGINT date_id PK
+    DATE date
+    INT year
+    INT month
+    INT day
+    INT weekday
+    INT week_of_year
+    BOOLEAN is_weekend
+  }
+
+  DIM_INCIDENT_TYPE {
+    BIGINT incident_type_id PK
+    VARCHAR call_type
+    VARCHAR call_type_group
+    VARCHAR primary_situation
+    INT final_priority
+  }
+
+  DIM_LOCATION {
+    BIGINT location_id PK
+    VARCHAR location_key "md5 hash, stable join key"
+    VARCHAR address
+    VARCHAR city
+    VARCHAR zipcode
+    VARCHAR neighborhood
+    VARCHAR battalion
+    VARCHAR station_area
+    INT supervisor_district
+    VARCHAR fire_prevention_district
+    VARCHAR box
+    VARCHAR location_point
+  }
+
+  FACT_INCIDENT {
+    BIGINT incident_id PK
+    VARCHAR incident_number
+    VARCHAR call_number
+
+    BIGINT date_id FK
+    BIGINT location_id FK
+    BIGINT incident_type_id FK
+
+    TIMESTAMP received_ts
+    TIMESTAMP dispatch_ts
+    TIMESTAMP response_ts
+    TIMESTAMP on_scene_ts
+    TIMESTAMP close_ts
+
+    DOUBLE response_time_sec
+    DOUBLE dispatch_delay_sec
+    DOUBLE travel_time_sec
+    DOUBLE incident_duration_sec
+
+    INT number_of_alarms
+    INT suppression_units
+    INT suppression_personnel
+    INT ems_units
+    INT ems_personnel
+    INT other_units
+    INT other_personnel
+
+    DOUBLE estimated_property_loss
+    DOUBLE estimated_contents_loss
+
+    INT final_priority
+  }
+
+```
