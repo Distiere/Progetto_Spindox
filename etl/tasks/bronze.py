@@ -5,7 +5,7 @@ from utils import get_db_connection, Schemas
 
 
 def _sanitize_column_names(columns: list[str]) -> list[str]:
-    """Converte i nomi delle colonne in snake_case (semplice)."""
+    """Converte i nomi delle colonne in snake_case."""
     return [
         col.lower().strip()
         .replace(" ", "_")
@@ -18,7 +18,7 @@ def _sanitize_column_names(columns: list[str]) -> list[str]:
 @task(name="bronze_ingestion")
 def ingest_bronze(source_path: str, table_name: str, schema_overrides: dict | None = None) -> int:
     """
-    Ingestione CSV -> DuckDB (schema bronze).
+    Ingestione CSV -> DuckDB.
 
     Args:
         source_path: percorso del CSV

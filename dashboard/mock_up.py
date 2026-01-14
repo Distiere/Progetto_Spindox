@@ -342,9 +342,3 @@ with tab_sev:
     plt.tight_layout()
     st.pyplot(fig2)
 
-# -----------------------------
-# data preview
-# -----------------------------
-with st.expander("Anteprima dati (calls)"):
-    sample = q(f"SELECT * FROM {BASE_CALLS} {where_calls} LIMIT 50")
-    st.dataframe(sample)

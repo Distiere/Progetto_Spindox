@@ -22,9 +22,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# -----------------------------
-# DB PATH
-# -----------------------------
+
 DB_PATH = Path(__file__).resolve().parents[1] / "data" / "warehouse.duckdb"
 
 
@@ -166,7 +164,7 @@ Regole:
 # -----------------------------
 # UI: HEADER CON DEFINIZIONE DASHBOARD
 # -----------------------------
-st.title("🚒 San Francisco Fire Dept — KPI Dashboard (Gold)")
+st.title("San Francisco Fire Dept — KPI Dashboard")
 st.caption("KPI e grafici calcolati sul Gold layer (fact + dimensions).")
 
 tab_dash, tab_t2s = st.tabs(["Dashboard KPI", "Text-to-SQL (Gemini)"])
@@ -301,7 +299,7 @@ with tab_dash:
 # ==========================================================
 with tab_t2s:
     st.subheader("Text-to-SQL (Gemini) — Gold layer")
-    st.caption("Scrivi una domanda in linguaggio naturale: Gemini genera una SELECT su DuckDB (solo gold).")
+    st.caption("Scrivi una domanda in linguaggio naturale: Gemini genera una SELECT su DuckDB.")
 
     question = st.text_area(
         "Domanda (es: 'Top 10 quartieri per numero incidenti nel 2019')",

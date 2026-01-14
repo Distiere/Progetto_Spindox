@@ -32,7 +32,7 @@ def build_dim_date() -> None:
             EXTRACT(year FROM d)::INT  AS year,
             EXTRACT(month FROM d)::INT AS month,
             EXTRACT(day FROM d)::INT   AS day,
-            EXTRACT(dow FROM d)::INT   AS weekday,          -- 0=Sunday
+            EXTRACT(dow FROM d)::INT   AS weekday,          
             EXTRACT(week FROM d)::INT  AS week_of_year,
             CASE WHEN EXTRACT(dow FROM d) IN (0,6) THEN TRUE ELSE FALSE END AS is_weekend
         FROM all_dates
@@ -140,7 +140,7 @@ def build_dim_location() -> None:
                 COALESCE(c_supervisor_district, i_supervisor_district) AS supervisor_district,
                 NULLIF(TRIM(c_fire_prevention_district), '') AS fire_prevention_district,
 
-                -- box: mismatch risolto forzando VARCHAR
+                -- mismatch risolto forzando VARCHAR (patch eseguita dopo gold gate)
                 NULLIF(TRIM(COALESCE(CAST(c_box AS VARCHAR), CAST(i_box AS VARCHAR))), '') AS box,
 
                 NULLIF(TRIM(COALESCE(c_location_point, i_location_point)), '') AS location_point
@@ -148,7 +148,7 @@ def build_dim_location() -> None:
         ),
         keyed AS (
             SELECT
-                -- Chiave stabile per join fact↔dim (evita mismatch su molte colonne)
+                -- Chiave stabile per join fact↔dim (evita mismatch su molte colonne dopo anche qui blocco del gate gold)
                 md5(
                     COALESCE(address,'') || '|' ||
                     COALESCE(city,'') || '|' ||
@@ -226,7 +226,7 @@ def build_fact_incident() -> None:
                 -- close (per duration)
                 i.close_ts,
 
-                -- location fields per hash
+                -- location fields per hash (altrimenti si avevano troppi mismatch)
                 c.address AS c_address,
                 c.city AS c_city,
                 c.zipcode_of_incident AS c_zipcode,
