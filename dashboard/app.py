@@ -156,7 +156,7 @@ Regole:
     prompt = f"{schema_hint}\nDomanda utente: {question}\nSQL:"
 
     resp = client.models.generate_content(
-        model="gemini-1.5-pro",
+        #model="gemini-1.5-pro",
         contents=prompt,
     )
     return (resp.text or "").strip()
