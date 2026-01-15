@@ -4,6 +4,7 @@ import pandas as pd
 import os
 import re
 
+
 from dotenv import load_dotenv
 load_dotenv()
 from pathlib import Path
@@ -12,7 +13,7 @@ from pathlib import Path
 try:
     from google import genai
 except Exception:
-    genai = None 
+    genai = None
 
 # -----------------------------
 # PAGE CONFIG
@@ -155,7 +156,7 @@ Regole:
     prompt = f"{schema_hint}\nDomanda utente: {question}\nSQL:"
 
     resp = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-1.5-pro",
         contents=prompt,
     )
     return (resp.text or "").strip()
