@@ -330,6 +330,6 @@ with tab_t2s:
         try:
             df = read_df(clean_sql_fences(sql))
             st.success(f"OK — righe: {len(df):,}")
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width='stretch')
         except Exception as e:
             st.error(f"Errore eseguendo SQL su DuckDB: {e}")    
