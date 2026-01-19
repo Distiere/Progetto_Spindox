@@ -125,9 +125,9 @@ def is_safe_select(sql: str) -> bool:
 
 
 def gemini_generate_sql(question: str) -> str:
-    api_key = os.getenv("GOOGLE_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("Manca GOOGLE_API_KEY nelle variabili d’ambiente.")
+        raise RuntimeError("Manca GEMINI_API_KEY nelle variabili d’ambiente.")
 
     if genai is None:
         raise RuntimeError("Libreria 'google-genai' non installata. Aggiungila a requirements.txt.")
@@ -156,7 +156,7 @@ Regole:
     prompt = f"{schema_hint}\nDomanda utente: {question}\nSQL:"
 
     resp = client.models.generate_content(
-        #model="gemini-1.5-pro",
+        model="models/gemini-flash-lite-latest",
         contents=prompt,
     )
     return (resp.text or "").strip()
@@ -311,7 +311,7 @@ with tab_t2s:
     with col_a:
         run_btn = st.button("Genera SQL + Esegui", type="primary", disabled=not question.strip())
     with col_b:
-        st.info("Richiede env var GOOGLE_API_KEY e dipendenza google-genai.", icon="ℹ️")
+        st.info("Richiede env var GEMINI_API_KEY e dipendenza google-genai.", icon="ℹ️")
 
     if run_btn:
         try:
