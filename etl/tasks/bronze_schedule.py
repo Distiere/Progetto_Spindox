@@ -2,7 +2,7 @@ import polars as pl
 from datetime import datetime, timezone
 from prefect import task, get_run_logger
 
-from utils import get_db_connection, Schemas, sanitize_columns
+from utils import get_db_connection, Schemas, sanitize_column_name, sanitize_columns
 
 
 def _utcnow_naive():
@@ -47,9 +47,15 @@ def _read_header_sanitized(csv_path: str) -> list[str]:
 
 
 def _detect_dataset_type(cols: list[str]) -> str:
-    # Regola robusta: calls ha call_number
-    if "call_number" in cols:
+    cols_set = set(cols)
+
+    # PRIORITÀ: incidents
+    if "incident_number" in cols_set:
+        return "incidents"
+
+    if "call_number" in cols_set:
         return "calls"
+
     return "incidents"
 
 
@@ -65,6 +71,16 @@ def _load_file_polars(path: str) -> pl.DataFrame:
     df.columns = sanitize_columns(df.columns)
     df = df.with_columns([pl.all().cast(pl.Utf8)])
     return df
+
+def _source_relation(source_path: str) -> str:
+    # In phase2 ingestiamo dal lake (parquet). Se capita CSV, supportiamolo comunque.
+    return "read_parquet(?)" if source_path.lower().endswith(".parquet") else "read_csv_auto(?, ALL_VARCHAR=TRUE)"
+
+def _get_source_cols_duckdb(con, source_path: str) -> list[str]:
+    rel = _source_relation(source_path)
+    rows = con.execute(f"DESCRIBE SELECT * FROM {rel}", [source_path]).fetchall()
+    # DESCRIBE: (column_name, column_type, null, key, default, extra)
+    return [sanitize_column_name(r[0]) for r in rows]
 
 
 @task(name="Phase2 - Bronze incremental ingest (from Data Lake if available)", retries=0)
@@ -101,84 +117,104 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
         source_path = str(lake_path) if lake_path else str(file_path)
         logger.info(f"Ingest source: {source_path}")
 
-        # Detect dataset: se parquet, prendiamo direttamente le colonne dal df;
-        # se csv, leggiamo header per evitare load completo doppio
-        if source_path.lower().endswith(".parquet"):
-            df = _load_file_polars(source_path)
-            cols = df.columns
-        else:
-            cols = _read_header_sanitized(source_path)
-            df = _load_file_polars(source_path)
-
-        dataset = _detect_dataset_type(cols)
-
-        # Colonne tecniche per idempotenza (robuste anche se già presenti nel parquet)
-        if "_source_row_number" not in df.columns:
-            df = df.with_row_index(name="_source_row_number")
-
-        df = df.with_columns([
-            pl.col("_source_row_number").cast(pl.Utf8).alias("_source_row_number"),
-            pl.lit(file_sha256).cast(pl.Utf8).alias("_source_sha256"),
-            pl.lit(source_path).cast(pl.Utf8).alias("_source_file_path"),
-            pl.lit(_utcnow_naive()).cast(pl.Utf8).alias("_ingested_at_utc"),
-        ])
-
-        target = f"{Schemas.BRONZE}.{dataset}"
+        target = None
+        count = 0
 
         with get_db_connection() as con:
             _ensure_schema(con)
 
+            # 1) Leggo lo schema colonne dalla sorgente (NO load in memoria)
+            src_cols = _get_source_cols_duckdb(con, source_path)
+
+            # 2) Detect dataset (qui DEVE essere incidents-first se usi merged)
+            dataset = _detect_dataset_type(src_cols)
+            target = f"{Schemas.BRONZE}.{dataset}"
+
+            # 3) Colonne tecniche (sempre presenti in bronze)
+            tech_cols = [
+                "_source_row_number",
+                "_source_sha256",
+                "_source_file_path",
+                "_ingested_at_utc",
+            ]
+
+            # 4) Se tabella non esiste, la creo con schema coerente (tutto VARCHAR)
             if not _table_exists(con, target):
                 logger.info(f"Tabella {target} non esiste: creazione.")
-                con.register("tmp_df", df.to_arrow())
-                con.execute(f"CREATE TABLE {target} AS SELECT * FROM tmp_df")
 
-                # count righe per questo sha (dopo create)
-                count = con.execute(
-                    f"SELECT COUNT(*) FROM {target} WHERE _source_sha256 = ?",
-                    [file_sha256],
-                ).fetchone()[0]
+                rel = _source_relation(source_path)
 
-            else:
-                existing_cols = _get_table_columns(con, target)
-                df_cols = df.columns
+                # Seleziono le colonne source come VARCHAR mantenendo i nomi sanitize
+                # IMPORTANT: qui assumiamo che i nomi colonna nella sorgente siano già compatibili
+                # con sanitize_column_name. Se non lo fossero, serve mappatura (ma nel tuo caso lo sono).
+                select_src = ",\n".join([f'CAST("{c}" AS VARCHAR) AS "{c}"' for c in src_cols])
 
-                # se il df ha colonne nuove -> alter table
-                new_cols = [c for c in df_cols if c not in existing_cols]
-                if new_cols:
-                    logger.info(f"Aggiungo nuove colonne a {target}: {new_cols}")
-                    _add_missing_columns(con, target, new_cols)
-                    existing_cols = _get_table_columns(con, target)
-
-                # se mancano colonne nel df -> le aggiungo come NULL
-                missing_in_df = [c for c in existing_cols if c not in df_cols]
-                if missing_in_df:
-                    df = df.with_columns([pl.lit(None).cast(pl.Utf8).alias(c) for c in missing_in_df])
-
-                # reorder come la tabella
-                df = df.select(existing_cols)
-
-                con.register("tmp_df", df.to_arrow())
-
-                # INSERT idempotente (stesso contenuto riletto -> no duplicates)
                 con.execute(
                     f"""
-                    INSERT INTO {target}
-                    SELECT t.*
-                    FROM tmp_df t
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM {target} b
-                        WHERE b._source_sha256 = t._source_sha256
-                          AND b._source_row_number = t._source_row_number
-                    )
-                    """
+                    CREATE TABLE {target} AS
+                    SELECT
+                      {select_src},
+                      CAST(row_number() OVER () - 1 AS VARCHAR) AS _source_row_number,
+                      CAST(? AS VARCHAR) AS _source_sha256,
+                      CAST(? AS VARCHAR) AS _source_file_path,
+                      CAST(? AS VARCHAR) AS _ingested_at_utc
+                    FROM {rel}
+                    WHERE 1=0
+                    """,
+                    [file_sha256, source_path, _utcnow_naive(), source_path],
                 )
 
-                # count righe per questo sha (post-insert)
-                count = con.execute(
-                    f"SELECT COUNT(*) FROM {target} WHERE _source_sha256 = ?",
-                    [file_sha256],
-                ).fetchone()[0]
+            # 5) Schema evolution: aggiungo eventuali nuove colonne source + tech
+            existing_cols = _get_table_columns(con, target)
+            desired_cols = src_cols + tech_cols
+
+            new_cols = [c for c in desired_cols if c not in existing_cols]
+            if new_cols:
+                logger.info(f"Aggiungo nuove colonne a {target}: {new_cols}")
+                _add_missing_columns(con, target, new_cols)
+                existing_cols = _get_table_columns(con, target)
+
+            # 6) Costruisco SELECT che produce ESATTAMENTE le colonne di tabella
+            # - source cols -> cast varchar
+            # - tech cols -> valorizzate
+            # - colonne in tabella ma non nel source -> NULL
+            rel = _source_relation(source_path)
+
+            select_map = {c: f'CAST("{c}" AS VARCHAR) AS "{c}"' for c in src_cols}
+            select_map["_source_row_number"] = 'CAST(row_number() OVER () - 1 AS VARCHAR) AS "_source_row_number"'
+            select_map["_source_sha256"] = 'CAST(? AS VARCHAR) AS "_source_sha256"'
+            select_map["_source_file_path"] = 'CAST(? AS VARCHAR) AS "_source_file_path"'
+            select_map["_ingested_at_utc"] = 'CAST(? AS VARCHAR) AS "_ingested_at_utc"'
+
+            for c in existing_cols:
+                if c not in select_map:
+                    select_map[c] = f'CAST(NULL AS VARCHAR) AS "{c}"'
+
+            final_select = ",\n".join([select_map[c] for c in existing_cols])
+
+            # 7) INSERT idempotente: anti-join su sha + row_number
+            con.execute(
+                f"""
+                INSERT INTO {target}
+                SELECT t.*
+                FROM (
+                  SELECT
+                    {final_select}
+                  FROM {rel}
+                ) t
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM {target} b
+                  WHERE b._source_sha256 = t._source_sha256
+                    AND b._source_row_number = t._source_row_number
+                )
+                """,
+                [source_path, file_sha256, source_path, _utcnow_naive()],
+            )
+
+            count = con.execute(
+                f"SELECT COUNT(*) FROM {target} WHERE _source_sha256 = ?",
+                [file_sha256],
+            ).fetchone()[0]
 
         if dataset == "calls":
             inserted_calls += int(count)

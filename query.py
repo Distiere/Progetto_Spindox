@@ -1,5 +1,12 @@
 import duckdb
 import pandas as pd
+
+df = pd.read_csv("data\Client_drop\Fire_Department_Calls_for_Service_merged.csv")
+df_2 = pd.read_csv("data\Client_drop\Fire_Incidents_merged.csv")
+#voglio avere i primi 20 record di df e df_2
+print(df.head(20))
+print(df_2.head(20))
+
 con = duckdb.connect("data/warehouse.duckdb", read_only=True)
 
 ## bisogno di calcolare il numero di chiamate totali, la data della prima e dell'ultima chiamata
@@ -34,10 +41,10 @@ con = duckdb.connect("data/warehouse.duckdb", read_only=True)
 #ORDER BY 1;
 #""")
 
-rows = con.execute("PRAGMA table_info('bronze.incidents')").fetchall()
-for r in rows:
-    print(r[1])
-
+#rows = con.execute("PRAGMA table_info('bronze.incidents')").fetchall()
+#for r in rows:
+#    print(r[1])
+#
 #print(query.df())
 #print(query_2.df())
 #print(query_3.df())

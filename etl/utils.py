@@ -29,6 +29,10 @@ class Schemas:
 def get_db_connection(read_only: bool = False):
     """Context manager per DuckDB."""
     con = duckdb.connect(DB_PATH, read_only=read_only)
+    con.execute("PRAGMA temp_directory='data/tmp_duckdb'")
+    con.execute("PRAGMA memory_limit='8GB'")   # se hai più RAM metti '8GB'
+    con.execute("PRAGMA threads=4")
+
     try:
         yield con
     finally:
@@ -44,29 +48,22 @@ _ACRONYM = re.compile(r"([A-Z]+)([A-Z][a-z])")
 
 
 def sanitize_column_name(col: str) -> str:
-    """Converte un nome colonna in snake_case in modo robusto.
-
-    Gestisce:
-    - spazi / '-' / '.' -> '_'
-    - CamelCase -> snake_case
-    - acronimi tipo 'DtTm' -> 'dt_tm'
-    """
     c = col.strip()
+    keep_leading_underscore = c.startswith("_")
 
-    # normalize separators first
     c = c.replace(" ", "_").replace("-", "_").replace(".", "_")
-
-    # deal with acronyms boundaries: 'DT' + 'Tm' -> 'DT_Tm'
     c = _ACRONYM.sub(r"\1_\2", c)
-
-    # camelCase / PascalCase boundaries
     c = _CAMEL_1.sub(r"\1_\2", c)
     c = _CAMEL_2.sub(r"\1_\2", c)
-
-    # collapse multiple underscores
     c = re.sub(r"__+", "_", c)
 
-    return c.lower().strip("_")
+    c = c.lower().strip("_")
+
+    if keep_leading_underscore:
+        c = "_" + c  # forza underscore iniziale
+
+    return c
+
 
 
 def sanitize_columns(columns: list[str]) -> list[str]:

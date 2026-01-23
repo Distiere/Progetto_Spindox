@@ -25,9 +25,25 @@ def _read_header_sanitized(csv_path: str) -> list[str]:
     return sanitize_columns(df0.columns)
 
 
-def _detect_dataset_type(cols: list[str]) -> str:
-    # Regola robusta: calls ha call_number, altrimenti incidents
-    return "fire_calls" if "call_number" in cols else "fire_incidents"
+def _detect_dataset_type(cols: list[str], file_path: str = "") -> str:
+    cols_set = set(cols)
+
+    # PRIORITÀ: incidents (i merged possono avere anche call_number)
+    if "incident_number" in cols_set:
+        return "fire_incidents"
+
+    if "call_number" in cols_set:
+        return "fire_calls"
+
+    # fallback sul nome file
+    name = Path(file_path).name.lower()
+    if "incident" in name:
+        return "fire_incidents"
+    if "call" in name:
+        return "fire_calls"
+
+    return "fire_incidents"
+
 
 
 def _load_csv_polars(csv_path: str) -> pl.DataFrame:
@@ -105,7 +121,7 @@ def write_pending_to_lake(run_id: str, pipeline_name: str = "phase2_incremental"
 
         # detect dataset senza fidarsi del nome file
         cols = _read_header_sanitized(csv_path)
-        dataset = _detect_dataset_type(cols)
+        dataset = _detect_dataset_type(cols, csv_path)
 
         # leggi tutto e scrivi parquet
         df = _load_csv_polars(csv_path)
