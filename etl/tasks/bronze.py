@@ -1,19 +1,19 @@
 import polars as pl
 from prefect import task, get_run_logger
 
-from utils import get_db_connection, Schemas
+from utils import get_db_connection, Schemas, sanitize_columns
 
-
-def _sanitize_column_names(columns: list[str]) -> list[str]:
-    """Converte i nomi delle colonne in snake_case."""
-    return [
-        col.lower().strip()
-        .replace(" ", "_")
-        .replace("-", "_")
-        .replace(".", "")
-        for col in columns
-    ]
-
+#
+#def _sanitize_column_names(columns: list[str]) -> list[str]:
+#    """Converte i nomi delle colonne in snake_case."""
+#    return [
+#        col.lower().strip()
+#        .replace(" ", "_")
+#        .replace("-", "_")
+#        .replace(".", "")
+#        for col in columns
+#    ]
+#
 
 @task(name="bronze_ingestion")
 def ingest_bronze(source_path: str, table_name: str, schema_overrides: dict | None = None) -> int:
@@ -44,7 +44,7 @@ def ingest_bronze(source_path: str, table_name: str, schema_overrides: dict | No
 
         # 2) Sanitize colonne
         old_cols = lazy_df.collect_schema().names()
-        new_cols = _sanitize_column_names(old_cols)
+        new_cols = sanitize_columns(old_cols)
         rename_map = dict(zip(old_cols, new_cols))
         lazy_df = lazy_df.rename(rename_map)
 
