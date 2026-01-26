@@ -1,8 +1,8 @@
 from prefect import task, get_run_logger
-from utils import get_db_connection, Schemas
+from etl.utils import get_db_connection, Schemas
 
 # riuso gli helper già presenti in silver.py (stesso progetto)
-from tasks.silver import _parse_date_sql, _parse_ts_sql
+from etl.tasks.silver import _parse_date_sql, _parse_ts_sql
 
 
 def _table_cols(con, schema: str, table: str) -> set[str]:

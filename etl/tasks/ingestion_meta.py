@@ -7,7 +7,7 @@ from typing import Optional, List, Dict
 
 from prefect import task, get_run_logger
 
-from utils import get_db_connection, CLIENT_DROP_DIR, Schemas
+from etl.utils import get_db_connection, CLIENT_DROP_DIR, Schemas
 
 
 META_DDL = f"""

@@ -1,13 +1,13 @@
 from prefect import flow
 
-from tasks.Lake_writer import write_pending_to_lake
-from tasks.silver_phase_2 import clean_silver_phase2
-from tasks.ingestion_meta import detect_and_log_client_drop
-from tasks.bronze_schedule import ingest_bronze_incremental
-from test.gate import validate_silver_quality
-from tasks.gold import build_dim_date, build_dim_incident_type, build_dim_location, build_fact_incident
-from tasks.kpi_gold_view import create_kpi_views
-from test.gate_gold import validate_gold_quality
+from etl.tasks.Lake_writer import write_pending_to_lake
+from etl.tasks.silver_phase_2 import clean_silver_phase2
+from etl.tasks.ingestion_meta import detect_and_log_client_drop
+from etl.tasks.bronze_schedule import ingest_bronze_incremental
+from etl.test.gate import validate_silver_quality
+from etl.tasks.gold import build_dim_date, build_dim_incident_type, build_dim_location, build_fact_incident
+from etl.tasks.kpi_gold_view import create_kpi_views
+from etl.test.gate_gold import validate_gold_quality
 
 
 @flow(name="San Francisco Fire Dept Pipeline - PHASE 2", log_prints=True)

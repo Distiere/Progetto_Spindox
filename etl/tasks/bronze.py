@@ -1,7 +1,7 @@
 import polars as pl
 from prefect import task, get_run_logger
 
-from utils import get_db_connection, Schemas, sanitize_columns
+from etl.utils import get_db_connection, Schemas, sanitize_columns
 
 #
 #def _sanitize_column_names(columns: list[str]) -> list[str]:

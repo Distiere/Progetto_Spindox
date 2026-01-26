@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import polars as pl
 from prefect import task, get_run_logger
 
-from utils import get_db_connection, Schemas, sanitize_columns
+from etl.utils import get_db_connection, Schemas, sanitize_columns
 
 # Root del Data Lake (open-source file-based + parquet colonnare)
 LAKE_ROOT_DIR = os.getenv("LAKE_ROOT_DIR", "data/Data_Lake")

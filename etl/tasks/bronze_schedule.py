@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from prefect import task, get_run_logger
 
-from utils import (
+from etl.utils import (
     get_db_connection,
     Schemas,
     sanitize_column_name,
@@ -251,7 +251,7 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                 f"SELECT COUNT(*) FROM {target} WHERE _source_sha256 = ?",
                 [file_sha256],
             ).fetchone()[0]
-            
+
             # INSERT idempotente
             con.execute(
                 f"""
@@ -270,13 +270,13 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                 """,
                 [file_sha256, source_path, _utcnow_naive(), source_path],
             )
-            
+
             # Count dopo l'insert (solo per questo sha)
             after_for_sha = con.execute(
                 f"SELECT COUNT(*) FROM {target} WHERE _source_sha256 = ?",
                 [file_sha256],
             ).fetchone()[0]
-            
+
             inserted_now = int(after_for_sha - before_for_sha)
             total_for_sha = int(after_for_sha)
 
