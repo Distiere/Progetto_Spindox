@@ -1,4 +1,3 @@
-
 import hashlib
 import uuid
 from dataclasses import dataclass
@@ -24,7 +23,7 @@ CREATE TABLE IF NOT EXISTS {Schemas.META}.ingestion_runs (
   notes             VARCHAR
 );
 
-CREATE TABLE IF NOT EXISTS meta.ingestion_log (
+CREATE TABLE IF NOT EXISTS {Schemas.META}.ingestion_log (
   log_id            UUID PRIMARY KEY,
   run_id            UUID NOT NULL,
   pipeline_name     VARCHAR NOT NULL,
@@ -43,12 +42,11 @@ CREATE TABLE IF NOT EXISTS meta.ingestion_log (
   lake_path         VARCHAR,
   lake_written_at   TIMESTAMP,
 
-  status            VARCHAR NOT NULL,
+  status            VARCHAR NOT NULL,   -- PENDING / SKIPPED / DONE / FAILED
   error_message     VARCHAR,
 
-  CONSTRAINT fk_run FOREIGN KEY(run_id) REFERENCES meta.ingestion_runs(run_id)
+  CONSTRAINT fk_run FOREIGN KEY(run_id) REFERENCES {Schemas.META}.ingestion_runs(run_id)
 );
-
 
 CREATE TABLE IF NOT EXISTS {Schemas.META}.ingested_contents (
   pipeline_name     VARCHAR NOT NULL,
@@ -74,6 +72,12 @@ class FileFingerprint:
 
 def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _ensure_meta_tables() -> None:
+    # crea schema+tabelle se non esistono
+    with get_db_connection() as con:
+        con.execute(META_DDL)
 
 
 def _sha256_of_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -107,11 +111,13 @@ def _scan_drop_zone(drop_dir: Path) -> List[Path]:
 
 def _start_run(pipeline_name: str, trigger_type: str, notes: Optional[str]) -> uuid.UUID:
     run_id = uuid.uuid4()
+    _ensure_meta_tables()
     with get_db_connection() as con:
-        con.execute(META_DDL)
         con.execute(
             f"""
-            INSERT INTO {Schemas.META}.ingestion_runs(run_id, pipeline_name, started_at, status, trigger_type, notes)
+            INSERT INTO {Schemas.META}.ingestion_runs(
+              run_id, pipeline_name, started_at, status, trigger_type, notes
+            )
             VALUES (?, ?, ?, 'RUNNING', ?, ?)
             """,
             [str(run_id), pipeline_name, _utcnow_naive(), trigger_type, notes],
@@ -132,6 +138,11 @@ def _finish_run(run_id: uuid.UUID, status: str) -> None:
 
 
 def _is_already_successfully_ingested(pipeline_name: str, sha256: str) -> bool:
+    """
+    True se quel contenuto (sha) è già stato processato con successo in passato
+    (presente in meta.ingested_contents).
+    """
+    _ensure_meta_tables()
     with get_db_connection(read_only=True) as con:
         row = con.execute(
             f"""
@@ -142,7 +153,7 @@ def _is_already_successfully_ingested(pipeline_name: str, sha256: str) -> bool:
             """,
             [pipeline_name, sha256],
         ).fetchone()
-        return row is not None
+    return row is not None
 
 
 def _insert_log(
@@ -171,7 +182,7 @@ def _insert_log(
                 drop_dir,
                 fp.file_name,
                 fp.file_path,
-                fp.file_size_bytes,
+                int(fp.file_size_bytes),
                 fp.file_mtime_utc,
                 fp.sha256,
                 _utcnow_naive(),
@@ -216,11 +227,25 @@ def detect_and_log_client_drop(
             try:
                 fp = _fingerprint_file(f)
 
-                if _is_already_successfully_ingested(pipeline_name, fp.sha256):
-                    _insert_log(run_id, pipeline_name, resolved_drop, fp, status="SKIPPED", error_message="Already ingested (SUCCESS) in past")
+                if fp.sha256 and _is_already_successfully_ingested(pipeline_name, fp.sha256):
+                    _insert_log(
+                        run_id=run_id,
+                        pipeline_name=pipeline_name,
+                        drop_dir=resolved_drop,
+                        fp=fp,
+                        status="SKIPPED",
+                        error_message="already_ingested",
+                    )
                     skipped += 1
                 else:
-                    _insert_log(run_id, pipeline_name, resolved_drop, fp, status="PENDING")
+                    _insert_log(
+                        run_id=run_id,
+                        pipeline_name=pipeline_name,
+                        drop_dir=resolved_drop,
+                        fp=fp,
+                        status="PENDING",
+                        error_message=None,
+                    )
                     pending += 1
 
             except Exception as e:
@@ -232,15 +257,22 @@ def detect_and_log_client_drop(
                     file_mtime_utc=_utcnow_naive(),
                     sha256="",
                 )
-                _insert_log(run_id, pipeline_name, resolved_drop, dummy, status="FAILED", error_message=str(e))
+                _insert_log(
+                    run_id=run_id,
+                    pipeline_name=pipeline_name,
+                    drop_dir=resolved_drop,
+                    fp=dummy,
+                    status="FAILED",
+                    error_message=str(e),
+                )
                 failed += 1
 
         # Run success anche se pending=0: è un no-op voluto
         _finish_run(run_id, status="SUCCESS")
 
-    except Exception as e:
+    except Exception:
         _finish_run(run_id, status="FAILED")
         raise
 
     logger.info(f"STEP1 summary | PENDING={pending} SKIPPED={skipped} FAILED={failed}")
-    return {"run_id": str(run_id), "pending": pending, "skipped": skipped, "failed": failed}
+    return {"run_id": str(run_id), "pending": pending, "skipped": skipped, "failed": failed, "files": len(files)}

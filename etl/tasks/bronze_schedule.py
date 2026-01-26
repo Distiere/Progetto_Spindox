@@ -16,6 +16,7 @@ def _utcnow_naive():
 
 def _ensure_schema(con):
     con.execute(f"CREATE SCHEMA IF NOT EXISTS {Schemas.BRONZE}")
+    con.execute(f"CREATE SCHEMA IF NOT EXISTS {Schemas.META}")
 
 
 def _table_exists(con, full_name: str) -> bool:
@@ -62,7 +63,6 @@ def _get_source_cols_duckdb(con, source_path: str) -> list[str]:
     """
     rel = _source_relation(source_path)
     rows = con.execute(f"DESCRIBE SELECT * FROM {rel}", [source_path]).fetchall()
-    # DESCRIBE: (column_name, column_type, null, key, default, extra)
     return [sanitize_column_name(r[0]) for r in rows]
 
 
@@ -73,32 +73,58 @@ def _detect_dataset_type(cols: list[str], file_path: str = "") -> str:
     (che contiene 'fire_calls' o 'fire_incidents').
     """
     cols_set = set(cols)
-
-    path_lc = str(Path(file_path)).lower()  # <-- path completo, non solo name
+    path_lc = str(Path(file_path)).lower()  # path completo
 
     has_inc = "incident_number" in cols_set
     has_call = "call_number" in cols_set
 
-    # Caso merged: entrambi presenti -> tie-breaker su path
     if has_inc and has_call:
         if "fire_calls" in path_lc or "calls" in path_lc or "call" in path_lc:
             return "calls"
         if "fire_incidents" in path_lc or "incidents" in path_lc or "incident" in path_lc:
             return "incidents"
-        return "incidents"  # default conservativo
+        return "incidents"
 
     if has_inc:
         return "incidents"
     if has_call:
         return "calls"
 
-    # fallback
     if "incident" in path_lc:
         return "incidents"
     if "call" in path_lc:
         return "calls"
 
     return "incidents"
+
+
+def _mark_done_and_upsert_success(run_id: str, pipeline_name: str, file_sha256: str):
+    """
+    - status DONE in ingestion_log per questa run_id
+    - upsert in ingested_contents (così la prossima detect può fare SKIPPED)
+    """
+    now = _utcnow_naive()
+    with get_db_connection() as con:
+        con.execute(
+            f"""
+            UPDATE {Schemas.META}.ingestion_log
+            SET status = 'DONE', error_message = NULL
+            WHERE run_id = ? AND pipeline_name = ? AND file_sha256 = ?
+            """,
+            [run_id, pipeline_name, file_sha256],
+        )
+
+        # upsert: first_success_at resta il primo, last_success_at si aggiorna
+        con.execute(
+            f"""
+            INSERT INTO {Schemas.META}.ingested_contents
+              (pipeline_name, content_sha256, first_success_at, last_success_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (pipeline_name, content_sha256)
+            DO UPDATE SET last_success_at = excluded.last_success_at
+            """,
+            [pipeline_name, file_sha256, now, now],
+        )
 
 
 @task(name="Phase2 - Bronze incremental ingest (from Data Lake if available)", retries=0)
@@ -138,14 +164,14 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
         with get_db_connection() as con:
             _ensure_schema(con)
 
-            # 1) Leggo lo schema colonne dalla sorgente (NO load in memoria)
+            # 1) schema colonne dalla sorgente (NO load in memoria)
             src_cols = _get_source_cols_duckdb(con, source_path)
 
-            # 2) Detect dataset (merged-safe)
+            # 2) detect dataset
             dataset = _detect_dataset_type(src_cols, source_path)
             target = f"{Schemas.BRONZE}.{dataset}"
 
-            # 3) Colonne tecniche (sempre presenti in bronze)
+            # 3) Colonne tecniche
             tech_cols = [
                 "_source_row_number",
                 "_source_sha256",
@@ -153,10 +179,9 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                 "_ingested_at_utc",
             ]
 
-            # 4) Se tabella non esiste, la creo vuota con schema coerente (tutto VARCHAR)
+            # 4) Se tabella non esiste, la creo vuota coerente (VARCHAR)
             if not _table_exists(con, target):
                 logger.info(f"Tabella {target} non esiste: creazione.")
-
                 rel = _source_relation(source_path)
                 select_src = ",\n".join([f'CAST("{c}" AS VARCHAR) AS "{c}"' for c in src_cols])
 
@@ -176,7 +201,7 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                     [file_sha256, source_path, _utcnow_naive(), source_path],
                 )
 
-            # 5) Schema evolution: aggiungo eventuali nuove colonne source + tech
+            # 5) Schema evolution: aggiungo eventuali colonne nuove
             existing_cols = _get_table_columns(con, target)
             desired_cols = src_cols + tech_cols
 
@@ -186,20 +211,13 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                 _add_missing_columns(con, target, new_cols)
                 existing_cols = _get_table_columns(con, target)
 
-            # 6) Costruisco SELECT che produce ESATTAMENTE le colonne di tabella
-            # - source cols -> cast varchar
-            # - tech cols -> valorizzate
-            # - colonne in tabella ma non nel source -> NULL
+            # 6) SELECT che produce esattamente le colonne di tabella
             rel = _source_relation(source_path)
 
             select_map = {c: f'CAST("{c}" AS VARCHAR) AS "{c}"' for c in src_cols}
             select_map["_source_row_number"] = 'CAST(row_number() OVER () - 1 AS VARCHAR) AS "_source_row_number"'
             select_map["_source_sha256"] = 'CAST(? AS VARCHAR) AS "_source_sha256"'
             select_map["_source_file_path"] = 'CAST(? AS VARCHAR) AS "_source_file_path"'
-            select_map["_ingested_at_utc"] = 'CAST(? AS VARCHAR) AS "_source_ingested_at_utc"'
-
-            # nota: vogliamo che la colonna si chiami _ingested_at_utc nella tabella
-            # quindi alias giusto:
             select_map["_ingested_at_utc"] = 'CAST(? AS VARCHAR) AS "_ingested_at_utc"'
 
             for c in existing_cols:
@@ -208,7 +226,7 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
 
             final_select = ",\n".join([select_map[c] for c in existing_cols])
 
-            # 7) INSERT idempotente: anti-join su sha + row_number
+            # 7) INSERT idempotente
             con.execute(
                 f"""
                 INSERT INTO {target}
@@ -224,22 +242,59 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                     AND b._source_row_number = t._source_row_number
                 )
                 """,
-                # ✅ ORDINE CORRETTO (fix BinderException):
-                # sha256, file_path, ingested_at, source_path(for read_parquet/read_csv)
+                # ordine placeholder: sha256, file_path, ingested_at, source_path
                 [file_sha256, source_path, _utcnow_naive(), source_path],
             )
 
-            count = con.execute(
+           # Count prima dell'insert (solo per questo sha)
+            before_for_sha = con.execute(
                 f"SELECT COUNT(*) FROM {target} WHERE _source_sha256 = ?",
                 [file_sha256],
             ).fetchone()[0]
+            
+            # INSERT idempotente
+            con.execute(
+                f"""
+                INSERT INTO {target}
+                SELECT t.*
+                FROM (
+                  SELECT
+                    {final_select}
+                  FROM {rel}
+                ) t
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM {target} b
+                  WHERE b._source_sha256 = t._source_sha256
+                    AND b._source_row_number = t._source_row_number
+                )
+                """,
+                [file_sha256, source_path, _utcnow_naive(), source_path],
+            )
+            
+            # Count dopo l'insert (solo per questo sha)
+            after_for_sha = con.execute(
+                f"SELECT COUNT(*) FROM {target} WHERE _source_sha256 = ?",
+                [file_sha256],
+            ).fetchone()[0]
+            
+            inserted_now = int(after_for_sha - before_for_sha)
+            total_for_sha = int(after_for_sha)
 
+
+        # contatori: SOLO inserted_now
         if dataset == "calls":
-            inserted_calls += int(count)
+            inserted_calls += int(inserted_now)
         else:
-            inserted_incidents += int(count)
+            inserted_incidents += int(inserted_now)
+
+        logger.info(
+            f"Bronze file done | dataset={dataset} inserted_now={inserted_now} total_for_sha={total_for_sha} sha={file_sha256}"
+        )
+
+        # Marca DONE + upsert in ingested_contents (incrementale vero)
+        _mark_done_and_upsert_success(run_id=run_id, pipeline_name=pipeline_name, file_sha256=file_sha256)
 
     logger.info(
-        f"Bronze ingest completato | calls={inserted_calls} incidents={inserted_incidents} files={len(rows)}"
+        f"Bronze ingest completato | inserted_calls={inserted_calls} inserted_incidents={inserted_incidents} files={len(rows)}"
     )
     return {"inserted_calls": inserted_calls, "inserted_incidents": inserted_incidents, "files": len(rows)}

@@ -28,19 +28,19 @@ def _read_header_sanitized(csv_path: str) -> list[str]:
 def _detect_dataset_type(cols: list[str], file_path: str = "") -> str:
     """
     Detect robusto per file RAW e MERGED:
-    - se ho sia incident_number sia call_number -> tie-breaker sul nome file
+    - se ho sia incident_number sia call_number -> tie-breaker su path/nome file
     - altrimenti: incident_number => incidents, call_number => calls
     """
     cols_set = set(cols)
-    name = Path(file_path).name.lower()
+    path_lc = str(Path(file_path)).lower()
 
     has_inc = "incident_number" in cols_set
     has_call = "call_number" in cols_set
 
     if has_inc and has_call:
-        if "calls" in name or "call" in name:
+        if "fire_calls" in path_lc or "calls" in path_lc or "call" in path_lc:
             return "fire_calls"
-        if "incidents" in name or "incident" in name:
+        if "fire_incidents" in path_lc or "incidents" in path_lc or "incident" in path_lc:
             return "fire_incidents"
         return "fire_incidents"  # default conservativo
 
@@ -49,10 +49,9 @@ def _detect_dataset_type(cols: list[str], file_path: str = "") -> str:
     if has_call:
         return "fire_calls"
 
-    # fallback sul nome file
-    if "incident" in name:
+    if "incident" in path_lc:
         return "fire_incidents"
-    if "call" in name:
+    if "call" in path_lc:
         return "fire_calls"
 
     return "fire_incidents"
@@ -108,7 +107,7 @@ def write_pending_to_lake(run_id: str, pipeline_name: str = "phase2_incremental"
     - Scrive Parquet colonnare in data/Data_Lake/<dataset>/ingest_date=YYYY-MM-DD/sha256=<sha>/
     - Aggiorna meta.ingestion_log con lake_path e lake_written_at
 
-    Non cambia status (resta PENDING) per permettere debug/test end-to-end.
+    NOTE: se il parquet esiste già (path deterministico per sha256), SKIPPA la scrittura.
     """
     logger = get_run_logger()
     ingest_date = _today_utc_str()
@@ -138,6 +137,23 @@ def write_pending_to_lake(run_id: str, pipeline_name: str = "phase2_incremental"
         cols = _read_header_sanitized(csv_path)
         dataset = _detect_dataset_type(cols, csv_path)
 
+        target = _lake_target_path(dataset, ingest_date, file_sha256)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        # SKIP se già esiste: evita overwrite inutili ad ogni run
+        if target.exists():
+            logger.info(f"Parquet già presente, skip write: {target}")
+            with get_db_connection() as con:
+                con.execute(
+                    f"""
+                    UPDATE {Schemas.META}.ingestion_log
+                    SET lake_path = ?, lake_written_at = COALESCE(lake_written_at, ?)
+                    WHERE run_id = ? AND pipeline_name = ? AND file_sha256 = ?
+                    """,
+                    [str(target), _utcnow_naive(), run_id, pipeline_name, file_sha256],
+                )
+            continue
+
         # leggi tutto e scrivi parquet
         df = _load_csv_polars(csv_path)
 
@@ -151,9 +167,6 @@ def write_pending_to_lake(run_id: str, pipeline_name: str = "phase2_incremental"
             ]
         )
         df = df.with_columns([pl.col("_source_row_number").cast(pl.Utf8)])
-
-        target = _lake_target_path(dataset, ingest_date, file_sha256)
-        target.parent.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Writing parquet to Data Lake: {target}")
         df.write_parquet(str(target))
