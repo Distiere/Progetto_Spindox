@@ -1,11 +1,11 @@
 import duckdb
 import pandas as pd
 
-df = pd.read_csv("data\Client_drop\Fire_Department_Calls_for_Service_merged.csv")
-df_2 = pd.read_csv("data\Client_drop\Fire_Incidents_merged.csv")
-#voglio avere i primi 20 record di df e df_2
-print(df.head(20))
-print(df_2.head(20))
+#df = pd.read_csv("data\Client_drop\Fire_Department_Calls_for_Service_merged.csv")
+#df_2 = pd.read_csv("data\Client_drop\Fire_Incidents_merged.csv")
+##voglio avere i primi 20 record di df e df_2
+#print(df.head(20))
+#print(df_2.head(20))
 
 con = duckdb.connect("data/warehouse.duckdb", read_only=True)
 
@@ -40,6 +40,8 @@ con = duckdb.connect("data/warehouse.duckdb", read_only=True)
 #GROUP BY 1
 #ORDER BY 1;
 #""")
+query_4 = con.execute("""SELECT * FROM information_schema.columns WHERE table_schema='bronze' AND table_name='calls' AND column_name LIKE '%dt%';
+""")
 
 #rows = con.execute("PRAGMA table_info('bronze.incidents')").fetchall()
 #for r in rows:
@@ -48,6 +50,7 @@ con = duckdb.connect("data/warehouse.duckdb", read_only=True)
 #print(query.df())
 #print(query_2.df())
 #print(query_3.df())
+print(query_4.df())
 
 
 #import polars as pl

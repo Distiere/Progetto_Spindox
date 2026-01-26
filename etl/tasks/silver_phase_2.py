@@ -5,6 +5,32 @@ from utils import get_db_connection, Schemas
 from tasks.silver import _parse_date_sql, _parse_ts_sql
 
 
+def _table_cols(con, schema: str, table: str) -> set[str]:
+    rows = con.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = ? AND table_name = ?
+        """,
+        [schema, table],
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def _pick(cols: set[str], *candidates: str) -> str | None:
+    """Ritorna il primo candidato presente in cols, altrimenti None."""
+    for c in candidates:
+        if c in cols:
+            return c
+    return None
+
+
+def _pick_or_null(cols: set[str], *candidates: str) -> str:
+    """Ritorna un identificatore colonna se esiste, altrimenti NULL."""
+    c = _pick(cols, *candidates)
+    return c if c else "NULL"
+
+
 @task(name="Clean Silver (PHASE 2)", retries=0)
 def clean_silver_phase2(
     memory_limit: str = "8GB",
@@ -12,11 +38,10 @@ def clean_silver_phase2(
     threads: int = 4,
 ) -> None:
     """
-    Silver PHASE 2 (compatibile con DB creato dalla Phase 1):
-    - calls: colonne con underscore (call_number, incident_number, ...)
-    - incidents: colonne senza underscore (incidentnumber, callnumber, ...)
-    - dedup con QUALIFY ROW_NUMBER()
-    - PRAGMA per evitare OutOfMemory (spill su disco)
+    Silver PHASE 2:
+    - Robust a differenze naming tra Phase1/Phase2 (dttm vs dt_tm, rowid vs row_id, ecc.)
+    - Dedup con QUALIFY ROW_NUMBER()
+    - PRAGMA anti-OOM (spill su disco)
     """
     logger = get_run_logger()
 
@@ -25,221 +50,232 @@ def clean_silver_phase2(
         con.execute(f"PRAGMA temp_directory='{temp_directory}';")
         con.execute(f"PRAGMA memory_limit='{memory_limit}';")
         con.execute(f"PRAGMA threads={int(threads)};")
+        con.execute("PRAGMA preserve_insertion_order=false;")
+        con.execute("PRAGMA threads=1;")
+
 
         con.execute(f"CREATE SCHEMA IF NOT EXISTS {Schemas.SILVER}")
 
-        # =========================
-        # SILVER: CALLS  (underscore)
-        # =========================
+        # =====================================================================
+        # SILVER: CALLS
+        # =====================================================================
         con.execute("DROP TABLE IF EXISTS silver.calls_clean")
+
+        calls_cols = _table_cols(con, "bronze", "calls")
+
+        # timestamp columns: Phase1 usa *_dttm, Phase2 usa *_dt_tm
+        received_col = _pick(calls_cols, "received_dt_tm", "received_dttm")
+        entry_col = _pick(calls_cols, "entry_dt_tm", "entry_dttm")
+        dispatch_col = _pick(calls_cols, "dispatch_dt_tm", "dispatch_dttm")
+        response_col = _pick(calls_cols, "response_dt_tm", "response_dttm")
+        on_scene_col = _pick(calls_cols, "on_scene_dt_tm", "on_scene_dttm")
+        transport_col = _pick(calls_cols, "transport_dt_tm", "transport_dttm")
+        hospital_col = _pick(calls_cols, "hospital_dt_tm", "hospital_dttm")
+        available_col = _pick(calls_cols, "available_dt_tm", "available_dttm")
+
+        if not received_col:
+            # senza received non possiamo deduplicare correttamente => errore esplicito
+            raise RuntimeError(
+                "bronze.calls non contiene né received_dt_tm né received_dttm. "
+                "Controlla naming/ingest Bronze."
+            )
+
+        # altre colonne con varianti frequenti
+        neighborhoods_col = _pick_or_null(
+            calls_cols,
+            "neighborhoods_analysis_boundaries",
+            "neighborhooods_analysis_boundaries",
+            "neighborhooods___analysis_boundaries",
+        )
+        rowid_col = _pick_or_null(calls_cols, "rowid", "row_id")
 
         calls_sql = f"""
         CREATE TABLE silver.calls_clean AS
+        WITH base AS (
+            SELECT
+                -- Keys
+                try_cast(call_number AS BIGINT) AS call_number,
+                try_cast(incident_number AS BIGINT) AS incident_number,
+                {_pick_or_null(calls_cols, "unit_id")} AS unit_id,
+        
+                -- Type / Priority
+                {_pick_or_null(calls_cols, "call_type")} AS call_type,
+                {_pick_or_null(calls_cols, "call_type_group")} AS call_type_group,
+                try_cast({_pick_or_null(calls_cols, "original_priority")} AS INTEGER) AS original_priority,
+                try_cast({_pick_or_null(calls_cols, "priority")} AS INTEGER) AS priority,
+                try_cast({_pick_or_null(calls_cols, "final_priority")} AS INTEGER) AS final_priority,
+                {_pick_or_null(calls_cols, "als_unit")} AS als_unit,
+        
+                -- Dates
+                {_parse_date_sql("call_date")}  AS call_date,
+                {_parse_date_sql("watch_date")} AS watch_date,
+        
+                -- Parsed timestamps (calcolati UNA volta)
+                {_parse_ts_sql(received_col)}    AS received_ts,
+                {_parse_ts_sql(entry_col)}       AS entry_ts,
+                {_parse_ts_sql(dispatch_col)}    AS dispatch_ts,
+                {_parse_ts_sql(response_col)}    AS response_ts,
+                {_parse_ts_sql(on_scene_col)}    AS on_scene_ts,
+                {_parse_ts_sql(transport_col)}   AS transport_ts,
+                {_parse_ts_sql(hospital_col)}    AS hospital_ts,
+                {_parse_ts_sql(available_col)}   AS available_ts,
+        
+                -- Location
+                {_pick_or_null(calls_cols, "address")} AS address,
+                {_pick_or_null(calls_cols, "city")} AS city,
+                try_cast({_pick_or_null(calls_cols, "zipcode_of_incident")} AS INTEGER) AS zipcode_of_incident,
+                {_pick_or_null(calls_cols, "battalion")} AS battalion,
+                {_pick_or_null(calls_cols, "station_area")} AS station_area,
+                {_pick_or_null(calls_cols, "box")} AS box,
+                try_cast({_pick_or_null(calls_cols, "supervisor_district")} AS INTEGER) AS supervisor_district,
+                {neighborhoods_col} AS neighborhoods_analysis_boundaries,
+                {_pick_or_null(calls_cols, "location")} AS location,
+        
+                -- Other useful fields
+                {_pick_or_null(calls_cols, "call_final_disposition")} AS call_final_disposition,
+                try_cast({_pick_or_null(calls_cols, "number_of_alarms")} AS INTEGER) AS number_of_alarms,
+                {_pick_or_null(calls_cols, "unit_type")} AS unit_type,
+                try_cast({_pick_or_null(calls_cols, "unit_sequence_in_call_dispatch")} AS INTEGER) AS unit_sequence_in_call_dispatch,
+                {_pick_or_null(calls_cols, "fire_prevention_district")} AS fire_prevention_district,
+                {rowid_col} AS rowid,
+        
+                -- Ingest ts (una volta)
+                try_cast(_ingested_at_utc AS TIMESTAMP) AS ingested_ts
+        
+            FROM bronze.calls
+        )
         SELECT
-            -- Keys
-            try_cast(call_number AS BIGINT) AS call_number,
-            try_cast(incident_number AS BIGINT) AS incident_number,
-            unit_id,
-
-            -- Type / Priority
-            call_type,
-            call_type_group,
-            try_cast(original_priority AS INTEGER) AS original_priority,
-            try_cast(priority AS INTEGER) AS priority,
-            try_cast(final_priority AS INTEGER) AS final_priority,
-            als_unit,
-
-            -- Dates / Timestamps
-            {_parse_date_sql("call_date")}  AS call_date,
-            {_parse_date_sql("watch_date")} AS watch_date,
-
-            {_parse_ts_sql("received_dttm")}   AS received_ts,
-            {_parse_ts_sql("entry_dttm")}      AS entry_ts,
-            {_parse_ts_sql("dispatch_dttm")}   AS dispatch_ts,
-            {_parse_ts_sql("response_dttm")}   AS response_ts,
-            {_parse_ts_sql("on_scene_dttm")}   AS on_scene_ts,
-            {_parse_ts_sql("transport_dttm")}  AS transport_ts,
-            {_parse_ts_sql("hospital_dttm")}   AS hospital_ts,
-            {_parse_ts_sql("available_dttm")}  AS available_ts,
-
-            -- Derived metrics (seconds)
+            *,
+            -- Derived metrics (seconds) usando le colonne già parse
             CASE
-              WHEN {_parse_ts_sql("received_dttm")} IS NOT NULL
-               AND {_parse_ts_sql("on_scene_dttm")} IS NOT NULL
+              WHEN received_ts IS NOT NULL AND on_scene_ts IS NOT NULL
               THEN
                 CASE
-                  WHEN datediff('second', {_parse_ts_sql("received_dttm")}, {_parse_ts_sql("on_scene_dttm")}) >= 0
-                  THEN datediff('second', {_parse_ts_sql("received_dttm")}, {_parse_ts_sql("on_scene_dttm")})
+                  WHEN datediff('second', received_ts, on_scene_ts) >= 0
+                  THEN datediff('second', received_ts, on_scene_ts)
                   ELSE NULL
                 END
               ELSE NULL
             END AS response_time_sec,
-
+        
             CASE
-              WHEN {_parse_ts_sql("received_dttm")} IS NOT NULL
-               AND {_parse_ts_sql("dispatch_dttm")} IS NOT NULL
+              WHEN received_ts IS NOT NULL AND dispatch_ts IS NOT NULL
               THEN
                 CASE
-                  WHEN datediff('second', {_parse_ts_sql("received_dttm")}, {_parse_ts_sql("dispatch_dttm")}) >= 0
-                  THEN datediff('second', {_parse_ts_sql("received_dttm")}, {_parse_ts_sql("dispatch_dttm")})
+                  WHEN datediff('second', received_ts, dispatch_ts) >= 0
+                  THEN datediff('second', received_ts, dispatch_ts)
                   ELSE NULL
                 END
               ELSE NULL
             END AS dispatch_delay_sec,
-
+        
             CASE
-              WHEN {_parse_ts_sql("dispatch_dttm")} IS NOT NULL
-               AND {_parse_ts_sql("on_scene_dttm")} IS NOT NULL
+              WHEN dispatch_ts IS NOT NULL AND on_scene_ts IS NOT NULL
               THEN
                 CASE
-                  WHEN datediff('second', {_parse_ts_sql("dispatch_dttm")}, {_parse_ts_sql("on_scene_dttm")}) >= 0
-                  THEN datediff('second', {_parse_ts_sql("dispatch_dttm")}, {_parse_ts_sql("on_scene_dttm")})
+                  WHEN datediff('second', dispatch_ts, on_scene_ts) >= 0
+                  THEN datediff('second', dispatch_ts, on_scene_ts)
                   ELSE NULL
                 END
               ELSE NULL
-            END AS travel_time_sec,
-
-            -- Location
-            address,
-            city,
-            try_cast(zipcode_of_incident AS INTEGER) AS zipcode_of_incident,
-            battalion,
-            station_area,
-            box,
-            try_cast(supervisor_district AS INTEGER) AS supervisor_district,
-
-            -- Fix “brutto” da sanitize bronze
-            neighborhooods___analysis_boundaries AS neighborhoods_analysis_boundaries,
-            location,
-
-            -- Other useful fields
-            call_final_disposition,
-            try_cast(number_of_alarms AS INTEGER) AS number_of_alarms,
-            unit_type,
-            try_cast(unit_sequence_in_call_dispatch AS INTEGER) AS unit_sequence_in_call_dispatch,
-            fire_prevention_district,
-            rowid
-
-        FROM bronze.calls
+            END AS travel_time_sec
+        
+        FROM base
         QUALIFY ROW_NUMBER() OVER (
-          PARTITION BY try_cast(call_number AS BIGINT)
+          PARTITION BY call_number
           ORDER BY
-            COALESCE({_parse_ts_sql("received_dttm")}, TIMESTAMP '1900-01-01') DESC,
-            try_cast(_ingested_at_utc AS TIMESTAMP) DESC,
+            COALESCE(received_ts, TIMESTAMP '1900-01-01') DESC,
+            COALESCE(ingested_ts, TIMESTAMP '1900-01-01') DESC,
             rowid DESC
         ) = 1;
         """
+        
+
         logger.info("Creating silver.calls_clean (PHASE2) ...")
         con.execute(calls_sql)
         logger.info("silver.calls_clean created.")
 
-        # =========================
-        # SILVER: INCIDENTS (no underscore, come silver.py)
-        # =========================
+        # =====================================================================
+        # SILVER: INCIDENTS
+        # =====================================================================
         con.execute("DROP TABLE IF EXISTS silver.incidents_clean")
+
+        inc_cols = _table_cols(con, "bronze", "incidents")
+
+        # keys / timestamps: supporto naming con e senza underscore
+        inc_incident = _pick(inc_cols, "incident_number", "incidentnumber")
+        inc_call = _pick(inc_cols, "call_number", "callnumber")
+        inc_exposure = _pick(inc_cols, "exposure_number", "exposurenumber")
+
+        inc_incident_date = _pick(inc_cols, "incident_date", "incidentdate")
+        inc_alarm = _pick(inc_cols, "alarm_dt_tm", "alarmdttm", "alarm_dt_tm")
+        inc_arrival = _pick(inc_cols, "arrival_dt_tm", "arrivaldttm")
+        inc_close = _pick(inc_cols, "close_dt_tm", "closedttm")
 
         incidents_sql = f"""
         CREATE TABLE silver.incidents_clean AS
         SELECT
-            -- Keys (standard)
-            try_cast(incidentnumber AS BIGINT) AS incident_number,
-            try_cast(callnumber AS BIGINT)     AS call_number,
-            try_cast(exposurenumber AS INTEGER) AS exposure_number,
+            -- Keys
+            try_cast({inc_incident} AS BIGINT) AS incident_number,
+            try_cast({inc_call} AS BIGINT)     AS call_number,
+            try_cast({_pick_or_null(inc_cols, inc_exposure)} AS INTEGER) AS exposure_number,
 
             -- Date / timestamps
-            {_parse_date_sql("incidentdate")} AS incident_date,
-            {_parse_ts_sql("alarmdttm")}      AS alarm_ts,
-            {_parse_ts_sql("arrivaldttm")}    AS arrival_ts,
-            {_parse_ts_sql("closedttm")}      AS close_ts,
+            {_parse_date_sql(inc_incident_date)} AS incident_date,
+            {_parse_ts_sql(inc_alarm)}           AS alarm_ts,
+            {_parse_ts_sql(inc_arrival)}         AS arrival_ts,
+            {_parse_ts_sql(inc_close)}           AS close_ts,
 
-            -- Location (standard)
-            address,
-            city,
-            try_cast(zipcode AS INTEGER) AS zipcode,
-            battalion,
-            stationarea AS station_area,
-            box,
-            try_cast(supervisordistrict AS INTEGER) AS supervisor_district,
-            neighborhooddistrict AS neighborhood_district,
-            location,
+            -- Location
+            {_pick_or_null(inc_cols, "address")} AS address,
+            {_pick_or_null(inc_cols, "city")} AS city,
+            try_cast({_pick_or_null(inc_cols, "zipcode", "zip_code")} AS INTEGER) AS zipcode,
+            {_pick_or_null(inc_cols, "battalion")} AS battalion,
+            {_pick_or_null(inc_cols, "station_area", "stationarea")} AS station_area,
+            {_pick_or_null(inc_cols, "box")} AS box,
+            try_cast({_pick_or_null(inc_cols, "supervisor_district", "supervisordistrict")} AS INTEGER) AS supervisor_district,
+            {_pick_or_null(inc_cols, "neighborhood_district", "neighborhooddistrict")} AS neighborhood_district,
+            {_pick_or_null(inc_cols, "location")} AS location,
 
             -- Measures / severity
-            try_cast(numberofalarms AS INTEGER) AS number_of_alarms,
-            try_cast(suppressionunits AS INTEGER) AS suppression_units,
-            try_cast(suppressionpersonnel AS INTEGER) AS suppression_personnel,
-            try_cast(emsunits AS INTEGER) AS ems_units,
-            try_cast(emspersonnel AS INTEGER) AS ems_personnel,
-            try_cast(otherunits AS INTEGER) AS other_units,
-            try_cast(otherpersonnel AS INTEGER) AS other_personnel,
+            try_cast({_pick_or_null(inc_cols, "number_of_alarms", "numberofalarms")} AS INTEGER) AS number_of_alarms,
+            try_cast({_pick_or_null(inc_cols, "suppression_units", "suppressionunits")} AS INTEGER) AS suppression_units,
+            try_cast({_pick_or_null(inc_cols, "suppression_personnel", "suppressionpersonnel")} AS INTEGER) AS suppression_personnel,
+            try_cast({_pick_or_null(inc_cols, "ems_units", "emsunits")} AS INTEGER) AS ems_units,
+            try_cast({_pick_or_null(inc_cols, "ems_personnel", "emspersonnel")} AS INTEGER) AS ems_personnel,
+            try_cast({_pick_or_null(inc_cols, "other_units", "otherunits")} AS INTEGER) AS other_units,
+            try_cast({_pick_or_null(inc_cols, "other_personnel", "otherpersonnel")} AS INTEGER) AS other_personnel,
 
             CASE
-              WHEN try_cast(estimatedpropertyloss AS BIGINT) < 0 THEN NULL
-              ELSE try_cast(estimatedpropertyloss AS BIGINT)
+              WHEN try_cast({_pick_or_null(inc_cols, "estimated_property_loss", "estimatedpropertyloss")} AS BIGINT) < 0 THEN NULL
+              ELSE try_cast({_pick_or_null(inc_cols, "estimated_property_loss", "estimatedpropertyloss")} AS BIGINT)
             END AS estimated_property_loss,
+
             CASE
-              WHEN try_cast(estimatedcontentsloss AS BIGINT) < 0 THEN NULL
-              ELSE try_cast(estimatedcontentsloss AS BIGINT)
+              WHEN try_cast({_pick_or_null(inc_cols, "estimated_contents_loss", "estimatedcontentsloss")} AS BIGINT) < 0 THEN NULL
+              ELSE try_cast({_pick_or_null(inc_cols, "estimated_contents_loss", "estimatedcontentsloss")} AS BIGINT)
             END AS estimated_contents_loss,
 
-            try_cast(firefatalities AS BIGINT) AS fire_fatalities,
-            try_cast(fireinjuries AS BIGINT) AS fire_injuries,
-            try_cast(civilianfatalities AS BIGINT) AS civilian_fatalities,
-            try_cast(civilianinjuries AS BIGINT) AS civilian_injuries,
+            try_cast({_pick_or_null(inc_cols, "fire_fatalities", "firefatalities")} AS BIGINT) AS fire_fatalities,
+            try_cast({_pick_or_null(inc_cols, "fire_injuries", "fireinjuries")} AS BIGINT) AS fire_injuries,
+            try_cast({_pick_or_null(inc_cols, "civilian_fatalities", "civilianfatalities")} AS BIGINT) AS civilian_fatalities,
+            try_cast({_pick_or_null(inc_cols, "civilian_injuries", "civilianinjuries")} AS BIGINT) AS civilian_injuries,
 
             -- Type / situation
-            primarysituation AS primary_situation,
-            mutualaid AS mutual_aid,
-
-            -- Optional descriptive attributes
-            actiontakenprimary AS action_taken_primary,
-            actiontakensecondary AS action_taken_secondary,
-            actiontakenother AS action_taken_other,
-            detectoralertedoccupants AS detector_alerted_occupants,
-            propertyuse AS property_use,
-            areaoffireorigin AS area_of_fire_origin,
-            ignitioncause AS ignition_cause,
-            ignitionfactorprimary AS ignition_factor_primary,
-            ignitionfactorsecondary AS ignition_factor_secondary,
-            heatsource AS heat_source,
-            itemfirstignited AS item_first_ignited,
-            humanfactorsassociatedwithignition AS human_factors_associated_with_ignition,
-            structuretype AS structure_type,
-            structurestatus AS structure_status,
-            flooroffireorigin AS floor_of_fire_origin,
-            firespread AS fire_spread,
-            noflamespead AS no_flame_spead,
-
-            try_cast(numberoffloorswithminimumdamage AS INTEGER) AS floors_min_damage,
-            try_cast(numberoffloorswithsignificantdamage AS INTEGER) AS floors_significant_damage,
-            try_cast(numberoffloorswithheavydamage AS INTEGER) AS floors_heavy_damage,
-            try_cast(numberoffloorswithextremedamage AS INTEGER) AS floors_extreme_damage,
-
-            detectorspresent AS detectors_present,
-            detectortype AS detector_type,
-            detectoroperation AS detector_operation,
-            detectoreffectiveness AS detector_effectiveness,
-            detectorfailurereason AS detector_failure_reason,
-
-            automaticextinguishingsystempresent AS automatic_extinguishing_system_present,
-            automaticextinguishingsytemtype AS automatic_extinguishing_system_type,
-            automaticextinguishingsytemperfomance AS automatic_extinguishing_system_performance,
-            automaticextinguishingsytemfailurereason AS automatic_extinguishing_system_failure_reason,
-            try_cast(numberofsprinklerheadsoperating AS INTEGER) AS sprinkler_heads_operating,
-
-            firstunitonscene AS first_unit_on_scene,
-            rowid
+            {_pick_or_null(inc_cols, "primary_situation", "primarysituation")} AS primary_situation,
+            {_pick_or_null(inc_cols, "mutual_aid", "mutualaid")} AS mutual_aid
 
         FROM bronze.incidents
         QUALIFY ROW_NUMBER() OVER (
-          PARTITION BY try_cast(incidentnumber AS BIGINT)
+          PARTITION BY try_cast({inc_incident} AS BIGINT), try_cast({inc_call} AS BIGINT)
           ORDER BY
-            COALESCE({_parse_ts_sql("alarmdttm")}, TIMESTAMP '1900-01-01') DESC,
-            try_cast(_ingested_at_utc AS TIMESTAMP) DESC,
-            rowid DESC
+            COALESCE({_parse_ts_sql(inc_alarm)}, TIMESTAMP '1900-01-01') DESC,
+            try_cast(_ingested_at_utc AS TIMESTAMP) DESC
         ) = 1;
         """
+
         logger.info("Creating silver.incidents_clean (PHASE2) ...")
         con.execute(incidents_sql)
         logger.info("silver.incidents_clean created.")
 
-    logger.info("Silver PHASE2 clean + dedup completato.")
+        logger.info("Silver PHASE2 clean + dedup completato.")

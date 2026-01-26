@@ -26,17 +26,30 @@ def _read_header_sanitized(csv_path: str) -> list[str]:
 
 
 def _detect_dataset_type(cols: list[str], file_path: str = "") -> str:
+    """
+    Detect robusto per file RAW e MERGED:
+    - se ho sia incident_number sia call_number -> tie-breaker sul nome file
+    - altrimenti: incident_number => incidents, call_number => calls
+    """
     cols_set = set(cols)
+    name = Path(file_path).name.lower()
 
-    # PRIORITÀ: incidents (i merged possono avere anche call_number)
-    if "incident_number" in cols_set:
+    has_inc = "incident_number" in cols_set
+    has_call = "call_number" in cols_set
+
+    if has_inc and has_call:
+        if "calls" in name or "call" in name:
+            return "fire_calls"
+        if "incidents" in name or "incident" in name:
+            return "fire_incidents"
+        return "fire_incidents"  # default conservativo
+
+    if has_inc:
         return "fire_incidents"
-
-    if "call_number" in cols_set:
+    if has_call:
         return "fire_calls"
 
     # fallback sul nome file
-    name = Path(file_path).name.lower()
     if "incident" in name:
         return "fire_incidents"
     if "call" in name:
@@ -45,16 +58,19 @@ def _detect_dataset_type(cols: list[str], file_path: str = "") -> str:
     return "fire_incidents"
 
 
-
 def _load_csv_polars(csv_path: str) -> pl.DataFrame:
-    # 0) leggo solo header per conoscere i nomi colonna originali
+    """
+    Carica CSV in Polars:
+    - legge header
+    - forza tutte le colonne a Utf8 già in parsing
+    - sanitize colonne
+    - collect streaming
+    """
     df0 = pl.read_csv(csv_path, n_rows=0)
     old_cols = df0.columns
 
-    # 1) forzo tutte le colonne a Utf8 già in parsing (zero inferenza numerica)
     schema_overrides = {c: pl.Utf8 for c in old_cols}
 
-    # 2) scan lazy (come in bronze.py)
     lazy_df = pl.scan_csv(
         csv_path,
         infer_schema_length=10000,
@@ -64,24 +80,24 @@ def _load_csv_polars(csv_path: str) -> pl.DataFrame:
         truncate_ragged_lines=True,
     )
 
-    # 3) sanitize colonne (stesso identico pattern del bronze.py)
     new_cols = sanitize_columns(old_cols)
     rename_map = dict(zip(old_cols, new_cols))
     lazy_df = lazy_df.rename(rename_map)
 
-    # 4) materializza
     df = lazy_df.collect(streaming=True)
-
-    # 5) cast “di sicurezza” (tutto string)
     df = df.with_columns([pl.all().cast(pl.Utf8)])
     return df
 
 
-
 def _lake_target_path(dataset: str, ingest_date: str, file_sha256: str) -> Path:
-    # Partizione per ingest_date + cartella per contenuto (sha)
-    # data/lake/fire_calls/ingest_date=YYYY-MM-DD/sha256=<sha>/data.parquet
-    return Path(LAKE_ROOT_DIR) / dataset / f"ingest_date={ingest_date}" / f"sha256={file_sha256}" / "data.parquet"
+    # data/Data_Lake/<dataset>/ingest_date=YYYY-MM-DD/sha256=<sha>/data.parquet
+    return (
+        Path(LAKE_ROOT_DIR)
+        / dataset
+        / f"ingest_date={ingest_date}"
+        / f"sha256={file_sha256}"
+        / "data.parquet"
+    )
 
 
 @task(name="Phase2 - Write PENDING to Data Lake (Parquet)", retries=0)
@@ -89,7 +105,7 @@ def write_pending_to_lake(run_id: str, pipeline_name: str = "phase2_incremental"
     """
     Data Lake:
     - Legge i file PENDING (CSV) rilevati in meta.ingestion_log
-    - Scrive Parquet colonnare in data/lake/<dataset>/ingest_date=YYYY-MM-DD/sha256=<sha>/
+    - Scrive Parquet colonnare in data/Data_Lake/<dataset>/ingest_date=YYYY-MM-DD/sha256=<sha>/
     - Aggiorna meta.ingestion_log con lake_path e lake_written_at
 
     Non cambia status (resta PENDING) per permettere debug/test end-to-end.
@@ -97,7 +113,6 @@ def write_pending_to_lake(run_id: str, pipeline_name: str = "phase2_incremental"
     logger = get_run_logger()
     ingest_date = _today_utc_str()
 
-    # prendo i file PENDING + sha
     with get_db_connection() as con:
         rows = con.execute(
             f"""
@@ -119,31 +134,30 @@ def write_pending_to_lake(run_id: str, pipeline_name: str = "phase2_incremental"
     for file_path, file_sha256 in rows:
         csv_path = str(file_path)
 
-        # detect dataset senza fidarsi del nome file
+        # detect dataset (merged-safe)
         cols = _read_header_sanitized(csv_path)
         dataset = _detect_dataset_type(cols, csv_path)
 
         # leggi tutto e scrivi parquet
         df = _load_csv_polars(csv_path)
 
-        # metadati utili nel lake (non rompe nulla e aiuta audit)
+        # metadati utili nel lake (audit) — non rompe nulla
         df = df.with_row_index(name="_source_row_number")
-        df = df.with_columns([
-            pl.lit(file_sha256).cast(pl.Utf8).alias("_source_sha256"),
-            pl.lit(csv_path).cast(pl.Utf8).alias("_source_file_path"),
-            pl.lit(_utcnow_naive()).cast(pl.Utf8).alias("_lake_written_at_utc"),
-        ])
+        df = df.with_columns(
+            [
+                pl.lit(file_sha256).cast(pl.Utf8).alias("_source_sha256"),
+                pl.lit(csv_path).cast(pl.Utf8).alias("_source_file_path"),
+                pl.lit(_utcnow_naive()).cast(pl.Utf8).alias("_lake_written_at_utc"),
+            ]
+        )
         df = df.with_columns([pl.col("_source_row_number").cast(pl.Utf8)])
 
         target = _lake_target_path(dataset, ingest_date, file_sha256)
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        # idempotenza lake-write: se già esiste quel parquet per quello sha, riscrivere è ok.
-        # Se vuoi “hard idempotent”, puoi skipparlo se target.exists().
         logger.info(f"Writing parquet to Data Lake: {target}")
         df.write_parquet(str(target))
 
-        # aggiorna meta.ingestion_log (assumiamo che lake_path e lake_written_at siano nel META_DDL)
         with get_db_connection() as con:
             con.execute(
                 f"""

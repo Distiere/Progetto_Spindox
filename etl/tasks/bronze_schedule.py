@@ -1,8 +1,13 @@
-import polars as pl
+from pathlib import Path
 from datetime import datetime, timezone
+
 from prefect import task, get_run_logger
 
-from utils import get_db_connection, Schemas, sanitize_column_name, sanitize_columns
+from utils import (
+    get_db_connection,
+    Schemas,
+    sanitize_column_name,
+)
 
 
 def _utcnow_naive():
@@ -38,49 +43,62 @@ def _get_table_columns(con, full_name: str) -> list[str]:
 def _add_missing_columns(con, full_name: str, missing: list[str]):
     # in bronze teniamo tutto come VARCHAR per robustezza
     for c in missing:
-        con.execute(f"ALTER TABLE {full_name} ADD COLUMN {c} VARCHAR")
+        con.execute(f'ALTER TABLE {full_name} ADD COLUMN "{c}" VARCHAR')
 
-
-def _read_header_sanitized(csv_path: str) -> list[str]:
-    df0 = pl.read_csv(csv_path, n_rows=0)
-    return sanitize_columns(df0.columns)
-
-
-def _detect_dataset_type(cols: list[str]) -> str:
-    cols_set = set(cols)
-
-    # PRIORITÀ: incidents
-    if "incident_number" in cols_set:
-        return "incidents"
-
-    if "call_number" in cols_set:
-        return "calls"
-
-    return "incidents"
-
-
-def _load_file_polars(path: str) -> pl.DataFrame:
-    """
-    Carica CSV o Parquet in Polars, sanitizza colonne e cast a string.
-    """
-    if path.lower().endswith(".parquet"):
-        df = pl.read_parquet(path)
-    else:
-        df = pl.read_csv(path, infer_schema_length=5000)
-
-    df.columns = sanitize_columns(df.columns)
-    df = df.with_columns([pl.all().cast(pl.Utf8)])
-    return df
 
 def _source_relation(source_path: str) -> str:
     # In phase2 ingestiamo dal lake (parquet). Se capita CSV, supportiamolo comunque.
-    return "read_parquet(?)" if source_path.lower().endswith(".parquet") else "read_csv_auto(?, ALL_VARCHAR=TRUE)"
+    return (
+        "read_parquet(?)"
+        if source_path.lower().endswith(".parquet")
+        else "read_csv_auto(?, ALL_VARCHAR=TRUE)"
+    )
+
 
 def _get_source_cols_duckdb(con, source_path: str) -> list[str]:
+    """
+    Legge SOLO lo schema delle colonne dalla sorgente via DuckDB (senza materializzare i dati).
+    Ritorna colonne già sanitize (snake_case) coerenti col resto pipeline.
+    """
     rel = _source_relation(source_path)
     rows = con.execute(f"DESCRIBE SELECT * FROM {rel}", [source_path]).fetchall()
     # DESCRIBE: (column_name, column_type, null, key, default, extra)
     return [sanitize_column_name(r[0]) for r in rows]
+
+
+def _detect_dataset_type(cols: list[str], file_path: str = "") -> str:
+    """
+    Detect robusto per i file merged e per i parquet del Data Lake.
+    IMPORTANT: per parquet il filename è sempre 'data.parquet', quindi usiamo il PATH completo
+    (che contiene 'fire_calls' o 'fire_incidents').
+    """
+    cols_set = set(cols)
+
+    path_lc = str(Path(file_path)).lower()  # <-- path completo, non solo name
+
+    has_inc = "incident_number" in cols_set
+    has_call = "call_number" in cols_set
+
+    # Caso merged: entrambi presenti -> tie-breaker su path
+    if has_inc and has_call:
+        if "fire_calls" in path_lc or "calls" in path_lc or "call" in path_lc:
+            return "calls"
+        if "fire_incidents" in path_lc or "incidents" in path_lc or "incident" in path_lc:
+            return "incidents"
+        return "incidents"  # default conservativo
+
+    if has_inc:
+        return "incidents"
+    if has_call:
+        return "calls"
+
+    # fallback
+    if "incident" in path_lc:
+        return "incidents"
+    if "call" in path_lc:
+        return "calls"
+
+    return "incidents"
 
 
 @task(name="Phase2 - Bronze incremental ingest (from Data Lake if available)", retries=0)
@@ -117,17 +135,14 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
         source_path = str(lake_path) if lake_path else str(file_path)
         logger.info(f"Ingest source: {source_path}")
 
-        target = None
-        count = 0
-
         with get_db_connection() as con:
             _ensure_schema(con)
 
             # 1) Leggo lo schema colonne dalla sorgente (NO load in memoria)
             src_cols = _get_source_cols_duckdb(con, source_path)
 
-            # 2) Detect dataset (qui DEVE essere incidents-first se usi merged)
-            dataset = _detect_dataset_type(src_cols)
+            # 2) Detect dataset (merged-safe)
+            dataset = _detect_dataset_type(src_cols, source_path)
             target = f"{Schemas.BRONZE}.{dataset}"
 
             # 3) Colonne tecniche (sempre presenti in bronze)
@@ -138,15 +153,11 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                 "_ingested_at_utc",
             ]
 
-            # 4) Se tabella non esiste, la creo con schema coerente (tutto VARCHAR)
+            # 4) Se tabella non esiste, la creo vuota con schema coerente (tutto VARCHAR)
             if not _table_exists(con, target):
                 logger.info(f"Tabella {target} non esiste: creazione.")
 
                 rel = _source_relation(source_path)
-
-                # Seleziono le colonne source come VARCHAR mantenendo i nomi sanitize
-                # IMPORTANT: qui assumiamo che i nomi colonna nella sorgente siano già compatibili
-                # con sanitize_column_name. Se non lo fossero, serve mappatura (ma nel tuo caso lo sono).
                 select_src = ",\n".join([f'CAST("{c}" AS VARCHAR) AS "{c}"' for c in src_cols])
 
                 con.execute(
@@ -161,6 +172,7 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                     FROM {rel}
                     WHERE 1=0
                     """,
+                    # ordine placeholder: sha256, file_path, ingested_at, source_path(for read_parquet/read_csv)
                     [file_sha256, source_path, _utcnow_naive(), source_path],
                 )
 
@@ -184,6 +196,10 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
             select_map["_source_row_number"] = 'CAST(row_number() OVER () - 1 AS VARCHAR) AS "_source_row_number"'
             select_map["_source_sha256"] = 'CAST(? AS VARCHAR) AS "_source_sha256"'
             select_map["_source_file_path"] = 'CAST(? AS VARCHAR) AS "_source_file_path"'
+            select_map["_ingested_at_utc"] = 'CAST(? AS VARCHAR) AS "_source_ingested_at_utc"'
+
+            # nota: vogliamo che la colonna si chiami _ingested_at_utc nella tabella
+            # quindi alias giusto:
             select_map["_ingested_at_utc"] = 'CAST(? AS VARCHAR) AS "_ingested_at_utc"'
 
             for c in existing_cols:
@@ -208,7 +224,9 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                     AND b._source_row_number = t._source_row_number
                 )
                 """,
-                [source_path, file_sha256, source_path, _utcnow_naive()],
+                # ✅ ORDINE CORRETTO (fix BinderException):
+                # sha256, file_path, ingested_at, source_path(for read_parquet/read_csv)
+                [file_sha256, source_path, _utcnow_naive(), source_path],
             )
 
             count = con.execute(
