@@ -21,14 +21,19 @@ def _ensure_schema(con):
 
 def _table_exists(con, full_name: str) -> bool:
     row = con.execute(
-        "SELECT 1 FROM information_schema.tables WHERE table_schema = ? AND table_name = ? LIMIT 1",
-        full_name.split("."),
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = ? AND table_name = ?
+        LIMIT 1
+        """,
+        full_name.split(".", 1),
     ).fetchone()
     return row is not None
 
 
 def _get_table_columns(con, full_name: str) -> list[str]:
-    schema, table = full_name.split(".")
+    schema, table = full_name.split(".", 1)
     rows = con.execute(
         """
         SELECT column_name
@@ -41,9 +46,8 @@ def _get_table_columns(con, full_name: str) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _add_missing_columns(con, full_name: str, missing: list[str]):
-    # in bronze teniamo tutto come VARCHAR per robustezza
-    for c in missing:
+def _add_missing_columns(con, full_name: str, cols: list[str]) -> None:
+    for c in cols:
         con.execute(f'ALTER TABLE {full_name} ADD COLUMN "{c}" VARCHAR')
 
 
@@ -57,26 +61,25 @@ def _source_relation(source_path: str) -> str:
 
 
 def _get_source_cols_duckdb(con, source_path: str) -> list[str]:
-    """
-    Legge SOLO lo schema delle colonne dalla sorgente via DuckDB (senza materializzare i dati).
-    Ritorna colonne già sanitize (snake_case) coerenti col resto pipeline.
-    """
     rel = _source_relation(source_path)
-    rows = con.execute(f"DESCRIBE SELECT * FROM {rel}", [source_path]).fetchall()
-    return [sanitize_column_name(r[0]) for r in rows]
+    rows = con.execute(
+        f"DESCRIBE SELECT * FROM {rel}",
+        [source_path],
+    ).fetchall()
+
+    cols = []
+    for r in rows:
+        colname = r[0]
+        cols.append(sanitize_column_name(colname))
+    return cols
 
 
-def _detect_dataset_type(cols: list[str], file_path: str = "") -> str:
-    """
-    Detect robusto per i file merged e per i parquet del Data Lake.
-    IMPORTANT: per parquet il filename è sempre 'data.parquet', quindi usiamo il PATH completo
-    (che contiene 'fire_calls' o 'fire_incidents').
-    """
-    cols_set = set(cols)
-    path_lc = str(Path(file_path)).lower()  # path completo
+def _detect_dataset_type(cols: list[str], source_path: str) -> str:
+    cols_lc = {c.lower() for c in cols}
+    path_lc = source_path.lower()
 
-    has_inc = "incident_number" in cols_set
-    has_call = "call_number" in cols_set
+    has_call = "call_number" in cols_lc or "callnumber" in cols_lc
+    has_inc = "incident_number" in cols_lc or "incidentnumber" in cols_lc
 
     if has_inc and has_call:
         if "fire_calls" in path_lc or "calls" in path_lc or "call" in path_lc:
@@ -135,12 +138,16 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
 
     Fonte preferita: Data Lake (lake_path -> parquet).
     Fallback: file_path (csv da Client_drop) se lake_path è NULL.
+
+    NOTE:
+    - Ingest "streaming" lato DuckDB: NON carica l'intero file in memoria.
+    - inserted_* conta SOLO le righe effettivamente nuove inserite in questa run.
     """
     logger = get_run_logger()
 
+    # Recupero i PENDING una volta, poi processo file-per-file
     with get_db_connection() as con:
         _ensure_schema(con)
-
         rows = con.execute(
             f"""
             SELECT file_path, file_sha256, lake_path
@@ -164,14 +171,14 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
         with get_db_connection() as con:
             _ensure_schema(con)
 
-            # 1) schema colonne dalla sorgente (NO load in memoria)
+            # 1) Colonne dalla sorgente (NO load in memoria)
             src_cols = _get_source_cols_duckdb(con, source_path)
 
-            # 2) detect dataset
+            # 2) Detect dataset
             dataset = _detect_dataset_type(src_cols, source_path)
             target = f"{Schemas.BRONZE}.{dataset}"
 
-            # 3) Colonne tecniche
+            # 3) Colonne tecniche (idempotenza)
             tech_cols = [
                 "_source_row_number",
                 "_source_sha256",
@@ -179,7 +186,7 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                 "_ingested_at_utc",
             ]
 
-            # 4) Se tabella non esiste, la creo vuota coerente (VARCHAR)
+            # 4) Se tabella non esiste, la creo VUOTA ma coerente (VARCHAR) con tutte le colonne attese
             if not _table_exists(con, target):
                 logger.info(f"Tabella {target} non esiste: creazione.")
                 rel = _source_relation(source_path)
@@ -201,7 +208,7 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                     [file_sha256, source_path, _utcnow_naive(), source_path],
                 )
 
-            # 5) Schema evolution: aggiungo eventuali colonne nuove
+            # 5) Schema evolution: aggiungo eventuali colonne nuove (sia src che tech)
             existing_cols = _get_table_columns(con, target)
             desired_cols = src_cols + tech_cols
 
@@ -211,7 +218,7 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                 _add_missing_columns(con, target, new_cols)
                 existing_cols = _get_table_columns(con, target)
 
-            # 6) SELECT che produce esattamente le colonne di tabella
+            # 6) SELECT che produce esattamente le colonne della tabella (mappa src->VARCHAR + tech)
             rel = _source_relation(source_path)
 
             select_map = {c: f'CAST("{c}" AS VARCHAR) AS "{c}"' for c in src_cols}
@@ -220,13 +227,20 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
             select_map["_source_file_path"] = 'CAST(? AS VARCHAR) AS "_source_file_path"'
             select_map["_ingested_at_utc"] = 'CAST(? AS VARCHAR) AS "_ingested_at_utc"'
 
+            # colonne presenti in tabella ma assenti nella sorgente -> NULL
             for c in existing_cols:
                 if c not in select_map:
                     select_map[c] = f'CAST(NULL AS VARCHAR) AS "{c}"'
 
             final_select = ",\n".join([select_map[c] for c in existing_cols])
 
-            # 7) INSERT idempotente
+            # 7) Count PRIMA dell'insert (solo per questo sha)
+            before_for_sha = con.execute(
+                f"SELECT COUNT(*) FROM {target} WHERE _source_sha256 = ?",
+                [file_sha256],
+            ).fetchone()[0]
+
+            # 8) INSERT idempotente (una sola volta!)
             con.execute(
                 f"""
                 INSERT INTO {target}
@@ -246,32 +260,7 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                 [file_sha256, source_path, _utcnow_naive(), source_path],
             )
 
-           # Count prima dell'insert (solo per questo sha)
-            before_for_sha = con.execute(
-                f"SELECT COUNT(*) FROM {target} WHERE _source_sha256 = ?",
-                [file_sha256],
-            ).fetchone()[0]
-
-            # INSERT idempotente
-            con.execute(
-                f"""
-                INSERT INTO {target}
-                SELECT t.*
-                FROM (
-                  SELECT
-                    {final_select}
-                  FROM {rel}
-                ) t
-                WHERE NOT EXISTS (
-                  SELECT 1 FROM {target} b
-                  WHERE b._source_sha256 = t._source_sha256
-                    AND b._source_row_number = t._source_row_number
-                )
-                """,
-                [file_sha256, source_path, _utcnow_naive(), source_path],
-            )
-
-            # Count dopo l'insert (solo per questo sha)
+            # 9) Count DOPO l'insert (solo per questo sha)
             after_for_sha = con.execute(
                 f"SELECT COUNT(*) FROM {target} WHERE _source_sha256 = ?",
                 [file_sha256],
@@ -280,12 +269,11 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
             inserted_now = int(after_for_sha - before_for_sha)
             total_for_sha = int(after_for_sha)
 
-
-        # contatori: SOLO inserted_now
+        # contatori: SOLO righe nuove effettivamente inserite
         if dataset == "calls":
-            inserted_calls += int(inserted_now)
+            inserted_calls += inserted_now
         else:
-            inserted_incidents += int(inserted_now)
+            inserted_incidents += inserted_now
 
         logger.info(
             f"Bronze file done | dataset={dataset} inserted_now={inserted_now} total_for_sha={total_for_sha} sha={file_sha256}"

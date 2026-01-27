@@ -2,13 +2,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 import duckdb
 
-# =========================
-# Config
-# =========================
-
-WAREHOUSE_DB = Path("data/warehouse.duckdb")
-EXPORT_DIR = Path("dashboard_exports")
-EXPORT_DB = EXPORT_DIR / "dashboard.duckdb"
+DEFAULT_WAREHOUSE_DB = Path("data/warehouse.duckdb")
+DEFAULT_EXPORT_DB = Path("dashboard_exports/dashboard.duckdb")
 
 KPI_VIEWS = [
     "v_kpi_incident_volume_month",
@@ -23,37 +18,49 @@ DIM_TABLES = [
 ]
 
 
-# =========================
-# Helpers
-# =========================
-
-def utcnow():
+def _utcnow_naive():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-# =========================
-# Main export logic
-# =========================
+def _sql_quote_path(p: Path) -> str:
+    """
+    DuckDB vuole stringhe con apici singoli.
+    Per sicurezza raddoppiamo eventuali apici singoli nel path.
+    """
+    s = str(p)
+    return "'" + s.replace("'", "''") + "'"
 
-def export_dashboard_db():
-    if not WAREHOUSE_DB.exists():
-        raise FileNotFoundError(f"Warehouse DB non trovato: {WAREHOUSE_DB}")
 
-    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+def export_dashboard_db(
+    output_path: str | Path = DEFAULT_EXPORT_DB,
+    warehouse_db: str | Path = DEFAULT_WAREHOUSE_DB,
+) -> Path:
+    """
+    Export serving DB cloud-friendly (dashboard.duckdb) con:
+      - KPI (gold.v_kpi_*)
+      - Dimensioni (gold.dim_*)
+    Non esporta fact_incident (troppo grande).
 
-    # Rimuovo export precedente se esiste
-    if EXPORT_DB.exists():
-        EXPORT_DB.unlink()
+    Compatibile con Prefect flow che passa output_path=...
+    """
+    warehouse_db = Path(warehouse_db)
+    output_path = Path(output_path)
 
-    # Connessione DB sorgente
-    src = duckdb.connect(str(WAREHOUSE_DB), read_only=True)
+    if not warehouse_db.exists():
+        raise FileNotFoundError(f"Warehouse DB non trovato: {warehouse_db}")
 
-    # Connessione DB destinazione (dashboard)
-    dst = duckdb.connect(str(EXPORT_DB))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # =========================
+    if output_path.exists():
+        output_path.unlink()
+
+    dst = duckdb.connect(str(output_path))
+
+    # ATTACH non supporta placeholder "?"
+    attached = _sql_quote_path(warehouse_db.resolve())
+    dst.execute(f"ATTACH {attached} AS src (READ_ONLY)")
+
     # Metadata
-    # =========================
     dst.execute(
         """
         CREATE TABLE dashboard_metadata (
@@ -63,24 +70,17 @@ def export_dashboard_db():
         )
         """
     )
-
     dst.execute(
-        """
-        INSERT INTO dashboard_metadata
-        VALUES (?, ?, ?)
-        """,
+        "INSERT INTO dashboard_metadata VALUES (?, ?, ?)",
         [
-            utcnow(),
-            str(WAREHOUSE_DB),
-            "Serving DB per Streamlit Cloud: KPI + dimensioni (no fact)"
+            _utcnow_naive(),
+            str(warehouse_db),
+            "Serving DB per Streamlit Cloud: KPI + dimensioni (no fact)",
         ],
     )
 
-    # =========================
     # Export KPI views
-    # =========================
     for view in KPI_VIEWS:
-        print(f"Export KPI view: gold.{view}")
         dst.execute(
             f"""
             CREATE TABLE {view} AS
@@ -89,11 +89,8 @@ def export_dashboard_db():
             """
         )
 
-    # =========================
-    # Export dimension tables
-    # =========================
+    # Export dimensions
     for dim in DIM_TABLES:
-        print(f"Export dimension: gold.{dim}")
         dst.execute(
             f"""
             CREATE TABLE {dim} AS
@@ -102,13 +99,11 @@ def export_dashboard_db():
             """
         )
 
-    # =========================
-    # Cleanup
-    # =========================
-    src.close()
+    dst.execute("DETACH src")
     dst.close()
 
-    print("Export completato:", EXPORT_DB.resolve())
+    print("Export completato:", output_path.resolve())
+    return output_path
 
 
 if __name__ == "__main__":
