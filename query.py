@@ -40,7 +40,11 @@ con = duckdb.connect("data/warehouse.duckdb", read_only=True)
 #GROUP BY 1
 #ORDER BY 1;
 #""")
-query_4 = con.execute("""SELECT * FROM information_schema.columns WHERE table_schema='bronze' AND table_name='calls' AND column_name LIKE '%dt%';
+query_4 = con.execute("""SELECT table_schema, table_name
+FROM information_schema.views
+WHERE table_schema='gold'
+ORDER BY table_name;
+
 """)
 
 #rows = con.execute("PRAGMA table_info('bronze.incidents')").fetchall()

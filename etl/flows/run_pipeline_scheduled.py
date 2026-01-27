@@ -1,13 +1,21 @@
 from prefect import flow
 
-from etl.tasks.Lake_writer import write_pending_to_lake
-from etl.tasks.silver_phase_2 import clean_silver_phase2
 from etl.tasks.ingestion_meta import detect_and_log_client_drop
+from etl.tasks.Lake_writer import write_pending_to_lake
 from etl.tasks.bronze_schedule import ingest_bronze_incremental
+from etl.tasks.silver_phase_2 import clean_silver_phase2
 from etl.test.gate import validate_silver_quality
-from etl.tasks.gold import build_dim_date, build_dim_incident_type, build_dim_location, build_fact_incident
+
+from etl.tasks.gold import (
+    build_dim_date,
+    build_dim_incident_type,
+    build_dim_location,
+    build_fact_incident,
+)
 from etl.tasks.kpi_gold_view import create_kpi_views
 from etl.test.gate_gold import validate_gold_quality
+
+from etl.tasks.dashboard_export import export_dashboard_db
 
 
 @flow(name="San Francisco Fire Dept Pipeline - PHASE 2", log_prints=True)
@@ -21,7 +29,7 @@ def phase2_flow():
         print("Nessun nuovo contenuto (PENDING=0): no-op.")
         return info
 
-    # STEP2: lake write (ora già skippa se parquet esiste)
+    # STEP2: lake write (skippa se parquet esiste)
     write_pending_to_lake(run_id=run_id)
 
     # STEP3: bronze ingest incrementale (idempotente)
@@ -53,6 +61,9 @@ def phase2_flow():
 
     create_kpi_views()
     validate_gold_quality()
+
+    # STEP6: export serving DB per pubblicazione Streamlit Cloud
+    export_dashboard_db(output_path="dashboard_exports/dashboard.duckdb")
 
     print("PHASE 2 completata con successo.")
     return {**info, **bronze_res, "skipped_downstream": False}
