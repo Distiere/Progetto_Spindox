@@ -1,5 +1,5 @@
 from prefect import task, get_run_logger
-from utils import get_db_connection
+from etl.utils import get_db_connection
 
 def _assert_sql(con, sql: str, msg: str):
     val = con.execute(sql).fetchone()[0]

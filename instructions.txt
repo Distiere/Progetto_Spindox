@@ -10,3 +10,9 @@ podman build -t sf-fire-dashboard -f podman/dockerfile .
 podman run --rm -p 8501:8501 -v ./data:/app/data:ro --env-file .env sf-fire-dashboard
 
  6) utilizzare query.py se si vuole consultare il db
+
+ instruzioni prefect stream
+ eseguire come comandi bash ciò che presente nella cartella orchestrator per avere orchestrazione della pipeline. prima creare
+ il server, poi generare se mai fatto il worker collegandosi alla rete in locale, ed infine deployare la pipeline.
+ 
+
