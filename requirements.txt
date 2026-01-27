@@ -2,7 +2,8 @@ duckdb
 polars
 pandas
 prefect
-streamlit
+streamlit==1.19.0
+altair==4.2.2
 python-dotenv
 matplotlib
 pandera
