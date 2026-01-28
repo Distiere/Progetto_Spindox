@@ -172,26 +172,31 @@ if MODE == "serving":
 
         # metadata: nel tuo export spesso è in main (es: main.dashboard_metadata)
         meta_schema = _find_schema_for(con, "dashboard_metadata")
-        if meta_schema:
-            meta = con.execute(f"SELECT * FROM {meta_schema}.dashboard_metadata").fetchdf()
-        else:
-            meta = None
+        meta = con.execute(f"SELECT * FROM {meta_schema}.dashboard_metadata").fetchdf() if meta_schema else None
 
         # (opzionale) dimensioni esportate
         dim_date_schema = _find_schema_for(con, "dim_date")
-        dim_it_schema = _find_schema_for(con, "dim_incident_type")
-        dim_loc_schema = _find_schema_for(con, "dim_location")
+        dim_it_schema   = _find_schema_for(con, "dim_incident_type")
+        dim_loc_schema  = _find_schema_for(con, "dim_location")
 
         dim_date = con.execute(f"SELECT * FROM {dim_date_schema}.dim_date").fetchdf() if dim_date_schema else None
-        dim_it = con.execute(f"SELECT * FROM {dim_it_schema}.dim_incident_type").fetchdf() if dim_it_schema else None
-        dim_loc = con.execute(f"SELECT * FROM {dim_loc_schema}.dim_location").fetchdf() if dim_loc_schema else None
+        dim_it   = con.execute(f"SELECT * FROM {dim_it_schema}.dim_incident_type").fetchdf() if dim_it_schema else None
+        dim_loc  = con.execute(f"SELECT * FROM {dim_loc_schema}.dim_location").fetchdf() if dim_loc_schema else None
 
     finally:
         con.close()
 
+    # Safe conversion (pandas-only)
     vol = _streamlit_safe_df(vol)
-    rt = _streamlit_safe_df(rt)
+    rt  = _streamlit_safe_df(rt)
+
+    # Qui facciamo “ultra safe”: stringhe pure
     top = _streamlit_safe_df(top)
+    if "call_type_group" in top.columns:
+        top["call_type_group"] = top["call_type_group"].map(lambda x: None if pd.isna(x) else str(x))
+    if "call_type" in top.columns:
+        top["call_type"] = top["call_type"].map(lambda x: None if pd.isna(x) else str(x))
+
     if meta is not None:
         meta = _streamlit_safe_df(meta)
     if dim_date is not None:
@@ -211,7 +216,8 @@ if MODE == "serving":
     st.dataframe(rt, use_container_width=True)
 
     st.subheader("🏷️ Top incident types")
-    st.dataframe(top, use_container_width=True)
+    # IMPORTANTISSIMO: st.table evita Arrow JS => niente LargeUtf8
+    st.table(top)
 
     with st.expander("🔎 Dimensioni (opzionale)"):
         if dim_date is not None:
@@ -225,6 +231,7 @@ if MODE == "serving":
             st.dataframe(dim_loc.head(200), use_container_width=True)
 
     st.stop()
+
 
 
 # -----------------------------
