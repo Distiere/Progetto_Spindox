@@ -64,21 +64,30 @@ def _view_exists(_con: duckdb.DuckDBPyConnection, schema: str, name: str) -> boo
 
 def _streamlit_safe_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Streamlit Cloud a volte non digerisce Arrow LargeUtf8 (large_string).
-    Forziamo le colonne testuali a stringhe Python (dtype=object).
+    Streamlit Cloud può crashare con Arrow LargeUtf8 (large_string) quando renderizza un dataframe.
+    Questa funzione forza TUTTE le colonne testuali a dtype 'object' (stringhe Python),
+    evitando la serializzazione Arrow problematiche.
     """
     if df is None or df.empty:
         return df
 
     out = df.copy()
+
     for c in out.columns:
-        # string dtype (include string[pyarrow], string[python], object con stringhe)
-        if pd.api.types.is_string_dtype(out[c]) or out[c].dtype == "object":
-            # astype(str) -> object, evita Arrow LargeUtf8
-            out[c] = out[c].astype(str)
-            # opzionale: ripristina NULL leggibili (se ti interessa)
-            out.loc[out[c].isin(["None", "nan", "NaT"]), c] = None
+        s = out[c]
+
+        # Se è una colonna testuale (include string[pyarrow], object, ecc.)
+        if pd.api.types.is_string_dtype(s) or s.dtype == "object":
+            # 1) Prova a trasformare in stringhe Python pure (object)
+            try:
+                # Questo è più "forte" di astype(str) perché evita backend Arrow
+                out[c] = s.astype("object").map(lambda x: None if pd.isna(x) else str(x))
+            except Exception:
+                # 2) Fallback brutale: passa da lista (forza oggetti Python)
+                out[c] = [None if pd.isna(x) else str(x) for x in s.tolist()]
+
     return out
+
 
 # Detect mode: FULL (locale) vs SERVING (cloud)
 _con0 = duckdb.connect(str(DB_PATH), read_only=True)
@@ -127,9 +136,19 @@ if MODE == "serving":
         meta = con.execute("SELECT * FROM meta.dashboard_metadata").df() if meta_exists else None
     finally:
         con.close()
-    vol = _streamlit_safe_df(vol)
-    rt  = _streamlit_safe_df(rt)
-    top = _streamlit_safe_df(top)
+        
+    vol = con.execute(
+    "SELECT * FROM gold.v_kpi_incident_volume_month ORDER BY year, month"
+    ).fetchdf()
+
+    rt = con.execute(
+        "SELECT * FROM gold.v_kpi_response_time_month ORDER BY year, month"
+    ).fetchdf()
+
+    top = con.execute(
+        "SELECT * FROM gold.v_kpi_top_incident_type ORDER BY incident_count DESC LIMIT 20"
+    ).fetchdf()
+
     if meta is not None:
         meta = _streamlit_safe_df(meta)
 
