@@ -62,6 +62,23 @@ def _view_exists(_con: duckdb.DuckDBPyConnection, schema: str, name: str) -> boo
     """
     return _con.execute(q, [schema, name]).fetchone() is not None
 
+def _streamlit_safe_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Streamlit Cloud a volte non digerisce Arrow LargeUtf8 (large_string).
+    Forziamo le colonne testuali a stringhe Python (dtype=object).
+    """
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+    for c in out.columns:
+        # string dtype (include string[pyarrow], string[python], object con stringhe)
+        if pd.api.types.is_string_dtype(out[c]) or out[c].dtype == "object":
+            # astype(str) -> object, evita Arrow LargeUtf8
+            out[c] = out[c].astype(str)
+            # opzionale: ripristina NULL leggibili (se ti interessa)
+            out.loc[out[c].isin(["None", "nan", "NaT"]), c] = None
+    return out
 
 # Detect mode: FULL (locale) vs SERVING (cloud)
 _con0 = duckdb.connect(str(DB_PATH), read_only=True)
@@ -110,6 +127,12 @@ if MODE == "serving":
         meta = con.execute("SELECT * FROM meta.dashboard_metadata").df() if meta_exists else None
     finally:
         con.close()
+    vol = _streamlit_safe_df(vol)
+    rt  = _streamlit_safe_df(rt)
+    top = _streamlit_safe_df(top)
+    if meta is not None:
+        meta = _streamlit_safe_df(meta)
+
 
     if meta is not None and not meta.empty and "exported_at_utc" in meta.columns:
         st.caption(f"Exported at (UTC): {meta.loc[0, 'exported_at_utc']}")
@@ -124,6 +147,7 @@ if MODE == "serving":
     st.dataframe(top, use_container_width=True)
 
     st.stop()
+
 
 
 # -----------------------------
