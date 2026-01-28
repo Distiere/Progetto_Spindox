@@ -7,7 +7,7 @@ import pandas as pd
 #print(df.head(20))
 #print(df_2.head(20))
 
-con = duckdb.connect("data/warehouse.duckdb", read_only=True)
+#con = duckdb.connect("data/warehouse.duckdb", read_only=True)
 
 ## bisogno di calcolare il numero di chiamate totali, la data della prima e dell'ultima chiamata
 #query = con.execute("""SELECT MIN(received_ts) AS min_ts, MAX(received_ts) AS max_ts, COUNT(*) AS n
@@ -40,12 +40,13 @@ con = duckdb.connect("data/warehouse.duckdb", read_only=True)
 #GROUP BY 1
 #ORDER BY 1;
 #""")
-query_4 = con.execute("""SELECT table_schema, table_name
-FROM information_schema.views
-WHERE table_schema='gold'
-ORDER BY table_name;
-
-""")
+#query_4 = con.execute("""SELECT table_schema, table_name
+#FROM information_schema.views
+#WHERE table_schema='gold'
+#ORDER BY table_name;
+#
+#""")
+con=duckdb.connect('dashboard_exports/dashboard.duckdb'); print(con.execute("""select table_schema, table_name from information_schema.tables order by 1,2""").fetchdf())
 
 #rows = con.execute("PRAGMA table_info('bronze.incidents')").fetchall()
 #for r in rows:
@@ -54,7 +55,7 @@ ORDER BY table_name;
 #print(query.df())
 #print(query_2.df())
 #print(query_3.df())
-print(query_4.df())
+#print(query_4.df())
 
 
 #import polars as pl
