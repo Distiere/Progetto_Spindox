@@ -1,325 +1,335 @@
-import os
-import re
-from pathlib import Path
-
+import streamlit as st
 import duckdb
 import pandas as pd
-import streamlit as st
+import os
+import re
+
+
 from dotenv import load_dotenv
-
 load_dotenv()
+from pathlib import Path
 
-# Text-to-SQL (opzionale)
+# Text-to-SQL (Gemini)
 try:
     from google import genai
 except Exception:
     genai = None
 
-
-# =====================================================
+# -----------------------------
 # PAGE CONFIG
-# =====================================================
+# -----------------------------
 st.set_page_config(
-    page_title="SF Fire Dept — KPI Dashboard",
+    page_title="SF Fire Dept — KPI Dashboard (Gold)",
     layout="wide",
 )
 
 
-# =====================================================
-# PATHS
-# =====================================================
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-DEFAULT_WAREHOUSE = PROJECT_ROOT / "data" / "warehouse.duckdb"
-DEFAULT_SERVING   = PROJECT_ROOT / "dashboard_exports" / "dashboard.duckdb"
-
-ENV_DB = os.getenv("DASHBOARD_DB_PATH")
-
-if ENV_DB:
-    DB_PATH = Path(ENV_DB)
-elif DEFAULT_WAREHOUSE.exists():
-    DB_PATH = DEFAULT_WAREHOUSE
-else:
-    DB_PATH = DEFAULT_SERVING
-
-DB_PATH = DB_PATH.resolve()
+DB_PATH = Path(__file__).resolve().parents[1] / "data" / "warehouse.duckdb"
 
 
-# =====================================================
-# SIDEBAR — MODE TOGGLE
-# =====================================================
-st.sidebar.header("Modalità DB")
-
-choice = st.sidebar.radio(
-    "Sorgente dati",
-    ["AUTO", "FULL (warehouse)", "SERVING (dashboard export)"],
-    index=0,
-    help=(
-        "AUTO: usa warehouse se esiste, altrimenti serving.\n"
-        "FULL: forza data/warehouse.duckdb (dataset completo).\n"
-        "SERVING: forza dashboard_exports/dashboard.duckdb (cloud-friendly)."
-    ),
-)
-
-if choice == "FULL (warehouse)":
-    DB_PATH = DEFAULT_WAREHOUSE
-elif choice == "SERVING (dashboard export)":
-    DB_PATH = DEFAULT_SERVING
-
-DB_PATH = DB_PATH.resolve()
-
-
-# =====================================================
-# HELPERS
-# =====================================================
-def _safe_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    FIX DEFINITIVO Streamlit Cloud:
-    elimina Arrow LargeUtf8 convertendo tutto a Python str/object.
-    """
-    if df is None or df.empty:
-        return df
-
-    out = df.copy()
-    for c in out.columns:
-        out[c] = out[c].apply(lambda x: None if pd.isna(x) else str(x))
-    return out
-
-
-def _find_schema_for(con: duckdb.DuckDBPyConnection, name: str) -> str | None:
-    q = """
-    SELECT table_schema
-    FROM information_schema.tables
-    WHERE table_name = ?
-    UNION ALL
-    SELECT table_schema
-    FROM information_schema.views
-    WHERE table_name = ?
-    """
-    rows = con.execute(q, [name, name]).fetchall()
-    if not rows:
-        return None
-
-    schemas = [r[0] for r in rows if r and r[0]]
-    return "gold" if "gold" in schemas else schemas[0]
-
-
-def detect_mode_and_schema():
-    if not DB_PATH.exists():
-        return "missing", None
-
-    con = duckdb.connect(str(DB_PATH), read_only=True)
-    try:
-        schema_fact = _find_schema_for(con, "fact_incident")
-        if schema_fact:
-            return "full", schema_fact
-
-        schema_kpi = _find_schema_for(con, "v_kpi_incident_volume_month")
-        if schema_kpi:
-            return "serving", schema_kpi
-
-        return "unknown", None
-    finally:
-        con.close()
-
-
-MODE, DATA_SCHEMA = detect_mode_and_schema()
-
-
-# =====================================================
-# HEADER
-# =====================================================
-st.title("🚒 San Francisco Fire Dept — KPI Dashboard")
-st.caption(f"DB: `{DB_PATH}` | mode: **{MODE.upper()}** | schema: `{DATA_SCHEMA or '-'}`")
-
-if MODE in ("missing", "unknown"):
-    st.error(
-        "Database non valido o non popolato.\n\n"
-        "Esegui la pipeline oppure genera `dashboard_exports/dashboard.duckdb`."
-    )
-    st.stop()
-
-
-# =====================================================
-# SERVING MODE (Streamlit Cloud)
-# =====================================================
-if MODE == "serving":
-    st.info("Modalità **SERVING** — KPI aggregati (cloud-ready, DB leggero)")
-
-    con = duckdb.connect(str(DB_PATH), read_only=True)
-    try:
-        vol = con.execute(
-            f"SELECT * FROM {DATA_SCHEMA}.v_kpi_incident_volume_month ORDER BY year, month"
-        ).fetchdf()
-
-        rt = con.execute(
-            f"SELECT * FROM {DATA_SCHEMA}.v_kpi_response_time_month ORDER BY year, month"
-        ).fetchdf()
-
-        top = con.execute(
-            f"""
-            SELECT
-              CAST(call_type_group AS VARCHAR) AS call_type_group,
-              CAST(call_type AS VARCHAR)       AS call_type,
-              incident_count,
-              avg_response_time_sec
-            FROM {DATA_SCHEMA}.v_kpi_top_incident_type
-            ORDER BY incident_count DESC
-            LIMIT 20
-            """
-        ).fetchdf()
-
-        meta_schema = _find_schema_for(con, "dashboard_metadata")
-        meta = (
-            con.execute(f"SELECT * FROM {meta_schema}.dashboard_metadata").fetchdf()
-            if meta_schema else None
-        )
-    finally:
-        con.close()
-
-    vol = _safe_df(vol)
-    rt  = _safe_df(rt)
-    top = _safe_df(top)
-    if meta is not None:
-        meta = _safe_df(meta)
-
-    if meta is not None and "exported_at_utc" in meta.columns:
-        st.caption(f"Exported at (UTC): {meta.loc[0, 'exported_at_utc']}")
-
-    st.subheader("📈 Incident volume (monthly)")
-    st.dataframe(vol, use_container_width=True)
-
-    st.subheader("⏱️ Avg response time (monthly)")
-    st.dataframe(rt, use_container_width=True)
-
-    st.subheader("🏷️ Top incident types")
-    st.dataframe(top, use_container_width=True)
-
-    st.stop()
-
-
-# =====================================================
-# FULL MODE (warehouse — locale)
-# =====================================================
-st.info("Modalità **FULL** — dataset completo (warehouse locale)")
-
+# -----------------------------
+# DB HELPERS
+# -----------------------------
 @st.cache_data(ttl=60)
 def read_df(sql: str) -> pd.DataFrame:
+    """Esegue una query e ritorna un pandas DataFrame (cache 60s)."""
     con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
-        return con.execute(sql).fetchdf()
+        return con.execute(sql).df()
     finally:
         con.close()
 
 
 @st.cache_data(ttl=300)
-def get_filters(schema: str):
-    years = read_df(f"""
+def get_filter_options():
+    """Preleva opzioni per i filtri (cache 5 min)."""
+    years = read_df("""
         SELECT DISTINCT d.year
-        FROM {schema}.fact_incident f
-        JOIN {schema}.dim_date d ON d.date_id = f.date_id
+        FROM gold.fact_incident f
+        JOIN gold.dim_date d ON d.date_id = f.date_id
         ORDER BY 1
     """)["year"].tolist()
 
     months = list(range(1, 13))
 
-    call_type_groups = read_df(f"""
+    call_type_groups = read_df("""
         SELECT DISTINCT it.call_type_group
-        FROM {schema}.fact_incident f
-        JOIN {schema}.dim_incident_type it ON it.incident_type_id = f.incident_type_id
-        WHERE it.call_type_group IS NOT NULL
+        FROM gold.fact_incident f
+        JOIN gold.dim_incident_type it ON it.incident_type_id = f.incident_type_id
+        WHERE it.call_type_group IS NOT NULL AND TRIM(it.call_type_group) <> ''
         ORDER BY 1
     """)["call_type_group"].tolist()
 
-    neighborhoods = read_df(f"""
+    neighborhoods = read_df("""
         SELECT DISTINCT l.neighborhood
-        FROM {schema}.fact_incident f
-        JOIN {schema}.dim_location l ON l.location_id = f.location_id
-        WHERE l.neighborhood IS NOT NULL
+        FROM gold.fact_incident f
+        JOIN gold.dim_location l ON l.location_id = f.location_id
+        WHERE l.neighborhood IS NOT NULL AND TRIM(l.neighborhood) <> ''
         ORDER BY 1
     """)["neighborhood"].tolist()
 
     return years, months, call_type_groups, neighborhoods
 
 
-def esc(x: str) -> str:
-    return x.replace("'", "''")
+def escape_sql_literal(value: str) -> str:
+    """Escapa apici singoli per sicurezza nelle stringhe SQL."""
+    return value.replace("'", "''")
 
 
-def build_where(y, m, c, n):
+def build_where(year_sel, month_sel, ctg_sel, neigh_sel) -> str:
+    """
+    Costruisce una WHERE dinamica.
+    Nota: usa alias d/it/l che sono coerenti con le query sotto.
+    """
     clauses = []
-    if y != "Tutti":
-        clauses.append(f"d.year = {int(y)}")
-    if m != "Tutti":
-        clauses.append(f"d.month = {int(m)}")
-    if c != "Tutti":
-        clauses.append(f"it.call_type_group = '{esc(c)}'")
-    if n != "Tutti":
-        clauses.append(f"l.neighborhood = '{esc(n)}'")
-    return "WHERE " + " AND ".join(clauses) if clauses else ""
+    if year_sel != "Tutti":
+        clauses.append(f"d.year = {int(year_sel)}")
+    if month_sel != "Tutti":
+        clauses.append(f"d.month = {int(month_sel)}")
+    if ctg_sel != "Tutti":
+        clauses.append(f"it.call_type_group = '{escape_sql_literal(ctg_sel)}'")
+    if neigh_sel != "Tutti":
+        clauses.append(f"l.neighborhood = '{escape_sql_literal(neigh_sel)}'")
+
+    return ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
 
-# ---------------- Filters
-years, months, ctgs, neighs = get_filters(DATA_SCHEMA)
+# -----------------------------
+# Text-to-SQL HELPERS
+# -----------------------------
+def clean_sql_fences(s: str) -> str:
+    s = s.strip()
+    s = re.sub(r"^```sql", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"^```", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r"```$", "", s, flags=re.IGNORECASE).strip()
+    return s
 
-st.sidebar.header("Filtri (FULL)")
-y = st.sidebar.selectbox("Anno", ["Tutti"] + years)
-m = st.sidebar.selectbox("Mese", ["Tutti"] + months)
-c = st.sidebar.selectbox("Call Type Group", ["Tutti"] + ctgs)
-n = st.sidebar.selectbox("Neighborhood", ["Tutti"] + neighs)
 
-where = build_where(y, m, c, n)
+def is_safe_select(sql: str) -> bool:
+    """Guardrail minimo: accetta solo SELECT/WITH e blocca DDL/DML e multi-statement."""
+    s = clean_sql_fences(sql)
+    s = s.rstrip(";").strip()
 
-# ---------------- KPIs
-st.subheader("KPI principali")
+    if not re.match(r"^(select|with)\b", s, flags=re.IGNORECASE):
+        return False
 
-kpi = read_df(f"""
-SELECT
-  COUNT(*) AS total_incidents,
-  AVG(f.response_time_sec) AS avg_response_time_sec
-FROM {DATA_SCHEMA}.fact_incident f
-JOIN {DATA_SCHEMA}.dim_date d ON d.date_id = f.date_id
-JOIN {DATA_SCHEMA}.dim_incident_type it ON it.incident_type_id = f.incident_type_id
-JOIN {DATA_SCHEMA}.dim_location l ON l.location_id = f.location_id
-{where}
-""").iloc[0]
+    forbidden = r"\b(insert|update|delete|drop|create|alter|truncate|copy|attach|detach|pragma)\b"
+    if re.search(forbidden, s, flags=re.IGNORECASE):
+        return False
 
-c1, c2 = st.columns(2)
-c1.metric("Incidenti", f"{int(kpi['total_incidents']):,}".replace(",", "."))
-c2.metric("Avg response time (sec)", f"{(kpi['avg_response_time_sec'] or 0):.1f}")
+    # no multi statement
+    if ";" in s:
+        return False
 
-# ---------------- Tables
-st.subheader("Trend mensile incidenti")
+    return True
 
-trend = _safe_df(read_df(f"""
-SELECT d.year, d.month, COUNT(*) AS incident_count
-FROM {DATA_SCHEMA}.fact_incident f
-JOIN {DATA_SCHEMA}.dim_date d ON d.date_id = f.date_id
-JOIN {DATA_SCHEMA}.dim_incident_type it ON it.incident_type_id = f.incident_type_id
-JOIN {DATA_SCHEMA}.dim_location l ON l.location_id = f.location_id
-{where}
-GROUP BY 1,2
-ORDER BY 1,2
-"""))
 
-st.dataframe(trend, use_container_width=True)
+def gemini_generate_sql(question: str) -> str:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Manca GEMINI_API_KEY nelle variabili d’ambiente.")
 
-st.subheader("Top incident types")
+    if genai is None:
+        raise RuntimeError("Libreria 'google-genai' non installata. Aggiungila a requirements.txt.")
 
-top = _safe_df(read_df(f"""
-SELECT
-  it.call_type_group,
-  it.call_type,
-  COUNT(*) AS incident_count,
-  AVG(f.response_time_sec) AS avg_response_time_sec
-FROM {DATA_SCHEMA}.fact_incident f
-JOIN {DATA_SCHEMA}.dim_date d ON d.date_id = f.date_id
-JOIN {DATA_SCHEMA}.dim_incident_type it ON it.incident_type_id = f.incident_type_id
-JOIN {DATA_SCHEMA}.dim_location l ON l.location_id = f.location_id
-{where}
-GROUP BY 1,2
-ORDER BY incident_count DESC
-LIMIT 20
-"""))
+    schema_hint = """
+Tabelle GOLD disponibili:
+- gold.fact_incident(incident_id, incident_number, call_number, date_id, location_id, incident_type_id,
+  received_ts, dispatch_ts, response_ts, on_scene_ts, close_ts,
+  response_time_sec, dispatch_delay_sec, travel_time_sec, incident_duration_sec,
+  number_of_alarms, suppression_units, suppression_personnel, ems_units, ems_personnel,
+  other_units, other_personnel, estimated_property_loss, estimated_contents_loss, final_priority)
 
-st.dataframe(top, use_container_width=True)
+- gold.dim_date(date_id, date, year, month, day, weekday, week_of_year, is_weekend)
+- gold.dim_location(location_id, address, city, zipcode, neighborhood, battalion, station_area,
+  supervisor_district, fire_prevention_district, box, location_point)
+- gold.dim_incident_type(incident_type_id, call_type, call_type_group, primary_situation, final_priority)
+
+Regole:
+- genera SOLO una query SQL DuckDB di tipo SELECT (o WITH).
+- usa SOLO lo schema gold.
+- aggiungi LIMIT 200 se il risultato può essere grande.
+- restituisci SOLO SQL, niente spiegazioni.
+"""
+
+    client = genai.Client(api_key=api_key)
+    prompt = f"{schema_hint}\nDomanda utente: {question}\nSQL:"
+
+    resp = client.models.generate_content(
+        model="models/gemini-flash-lite-latest",
+        contents=prompt,
+    )
+    return (resp.text or "").strip()
+
+
+# -----------------------------
+# UI: HEADER CON DEFINIZIONE DASHBOARD
+# -----------------------------
+st.title("San Francisco Fire Dept — KPI Dashboard")
+st.caption("KPI e grafici calcolati sul Gold layer (fact + dimensions).")
+
+tab_dash, tab_t2s = st.tabs(["Dashboard KPI", "Text-to-SQL (Gemini)"])
+
+# -----------------------------
+# TAB 1: DASHBOARD KPI
+# -----------------------------
+
+with tab_dash:
+
+    years, months, call_type_groups, neighborhoods = get_filter_options()
+
+    st.sidebar.header("Filtri")
+    year_sel = st.sidebar.selectbox("Anno", options=["Tutti"] + years, index=0)
+    month_sel = st.sidebar.selectbox("Mese", options=["Tutti"] + months, index=0)
+    ctg_sel = st.sidebar.selectbox("Call Type Group", options=["Tutti"] + call_type_groups, index=0)
+    neigh_sel = st.sidebar.selectbox("Neighborhood", options=["Tutti"] + neighborhoods, index=0)
+
+    where = build_where(year_sel, month_sel, ctg_sel, neigh_sel)
+
+    # -----------------------------
+    # KPI NUMERICHE
+    # -----------------------------
+    kpi_sql = f"""
+    SELECT
+      COUNT(*) AS total_incidents,
+      AVG(f.response_time_sec) FILTER (WHERE f.response_time_sec IS NOT NULL) AS avg_resp,
+      AVG(f.dispatch_delay_sec) FILTER (WHERE f.dispatch_delay_sec IS NOT NULL) AS avg_dispatch,
+      AVG(f.travel_time_sec) FILTER (WHERE f.travel_time_sec IS NOT NULL) AS avg_travel,
+      quantile_cont(f.response_time_sec, 0.9) FILTER (WHERE f.response_time_sec IS NOT NULL) AS p90_resp
+    FROM gold.fact_incident f
+    JOIN gold.dim_date d ON d.date_id = f.date_id
+    JOIN gold.dim_incident_type it ON it.incident_type_id = f.incident_type_id
+    JOIN gold.dim_location l ON l.location_id = f.location_id
+    {where};
+    """
+
+    k = read_df(kpi_sql).iloc[0]
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Incidenti totali", f"{int(k['total_incidents']):,}")
+    c2.metric("Avg Response (sec)", "n/a" if pd.isna(k["avg_resp"]) else f"{k['avg_resp']:.1f}")
+    c3.metric("Avg Dispatch Delay (sec)", "n/a" if pd.isna(k["avg_dispatch"]) else f"{k['avg_dispatch']:.1f}")
+    c4.metric("Avg Travel Time (sec)", "n/a" if pd.isna(k["avg_travel"]) else f"{k['avg_travel']:.1f}")
+    c5.metric("P90 Response (sec)", "n/a" if pd.isna(k["p90_resp"]) else f"{k['p90_resp']:.1f}")
+
+    st.divider()
+
+    # -----------------------------
+    # GRAFICO 1: Trend response time mensile (linechart)
+    # -----------------------------
+    st.subheader("Grafico 1 — Avg Response Time (Monthly)")
+    df_rt = read_df(f"""
+    SELECT
+      d.year,
+      d.month,
+      AVG(f.response_time_sec) AS avg_response_time_sec
+    FROM gold.fact_incident f
+    JOIN gold.dim_date d ON d.date_id = f.date_id
+    JOIN gold.dim_incident_type it ON it.incident_type_id = f.incident_type_id
+    JOIN gold.dim_location l ON l.location_id = f.location_id
+    {where}
+    AND f.response_time_sec IS NOT NULL
+    GROUP BY 1,2
+    ORDER BY 1,2
+    """)
+
+    if df_rt.empty:
+        st.info("Nessun dato per i filtri selezionati.")
+    else:
+        df_rt["ym"] = df_rt["year"].astype(str) + "-" + df_rt["month"].astype(str).str.zfill(2)
+        st.line_chart(df_rt.set_index("ym")[["avg_response_time_sec"]], height=260)
+
+    # -----------------------------
+    # GRAFICO 2: Volume incidenti mensile (barchart)
+    # -----------------------------
+    st.subheader("Grafico 2 — Incident Volume (Monthly)")
+    df_vol = read_df(f"""
+    SELECT
+      d.year,
+      d.month,
+      COUNT(*) AS incident_count
+    FROM gold.fact_incident f
+    JOIN gold.dim_date d ON d.date_id = f.date_id
+    JOIN gold.dim_incident_type it ON it.incident_type_id = f.incident_type_id
+    JOIN gold.dim_location l ON l.location_id = f.location_id
+    {where}
+    GROUP BY 1,2
+    ORDER BY 1,2
+    """)
+
+    if df_vol.empty:
+        st.info("Nessun dato per i filtri selezionati.")
+    else:
+        df_vol["ym"] = df_vol["year"].astype(str) + "-" + df_vol["month"].astype(str).str.zfill(2)
+        st.bar_chart(df_vol.set_index("ym")[["incident_count"]], height=260)
+
+    # -----------------------------
+    # GRAFICO 3: Top incident type (barchart)
+    # -----------------------------
+    st.subheader("Grafico 3 — Top Incident Types (count)")
+    df_top = read_df(f"""
+    SELECT
+      it.call_type_group,
+      it.call_type,
+      COUNT(*) AS incident_count
+    FROM gold.fact_incident f
+    JOIN gold.dim_date d ON d.date_id = f.date_id
+    JOIN gold.dim_incident_type it ON it.incident_type_id = f.incident_type_id
+    JOIN gold.dim_location l ON l.location_id = f.location_id
+    {where}
+    GROUP BY 1,2
+    ORDER BY incident_count DESC
+    LIMIT 15
+    """)
+
+    if df_top.empty:
+        st.info("Nessun dato per i filtri selezionati.")
+    else:
+        df_top["label"] = df_top["call_type_group"].fillna("N/A") + " | " + df_top["call_type"].fillna("N/A")
+        st.bar_chart(df_top.set_index("label")[["incident_count"]], height=320)
+
+    # -----------------------------
+    # tabelle di supporto
+    # -----------------------------
+    with st.expander("Mostra tabelle di supporto"):
+         st.dataframe(df_rt, width='stretch')
+         st.dataframe(df_vol, width='stretch')
+         st.dataframe(df_top, width='stretch')
+# ==========================================================
+# TAB 2: TEXT-TO-SQL (GEMINI)
+# ==========================================================
+with tab_t2s:
+    st.subheader("Text-to-SQL (Gemini) — Gold layer")
+    st.caption("Scrivi una domanda in linguaggio naturale: Gemini genera una SELECT su DuckDB.")
+
+    question = st.text_area(
+        "Domanda (es: 'Top 10 quartieri per numero incidenti nel 2019')",
+        height=110,
+    )
+
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        run_btn = st.button("Genera SQL + Esegui", type="primary", disabled=not question.strip())
+    with col_b:
+        st.info("Richiede env var GEMINI_API_KEY e dipendenza google-genai.", icon="ℹ️")
+
+    if run_btn:
+        try:
+            sql = gemini_generate_sql(question)
+        except Exception as e:
+            st.error(str(e))
+            st.stop()
+
+        st.markdown("**SQL generata:**")
+        st.code(sql, language="sql")
+
+        if not is_safe_select(sql):
+            st.error("Query bloccata: accetto solo SELECT/WITH sicure (no DDL/DML, no multi-statement).")
+            st.stop()
+
+        try:
+            df = read_df(clean_sql_fences(sql))
+            st.success(f"OK — righe: {len(df):,}")
+            st.dataframe(df, width='stretch')
+        except Exception as e:
+            st.error(f"Errore eseguendo SQL su DuckDB: {e}")    
