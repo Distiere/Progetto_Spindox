@@ -30,7 +30,7 @@ def get_db_connection(read_only: bool = False):
     """Context manager per DuckDB."""
     con = duckdb.connect(DB_PATH, read_only=read_only)
     con.execute("PRAGMA temp_directory='data/tmp_duckdb'")
-    con.execute("PRAGMA memory_limit='8GB'")   # se hai più RAM metti '8GB'
+    con.execute("PRAGMA memory_limit='8GB'")
     con.execute("PRAGMA threads=4")
 
     try:

@@ -20,7 +20,7 @@ def _today_utc_str() -> str:
 
 
 def _read_header_sanitized(csv_path: str) -> list[str]:
-    # leggiamo solo header (zero righe) per non caricare file intero
+    # leggiamo solo header per non caricare file intero
     df0 = pl.read_csv(csv_path, n_rows=0)
     return sanitize_columns(df0.columns)
 
@@ -42,7 +42,7 @@ def _detect_dataset_type(cols: list[str], file_path: str = "") -> str:
             return "fire_calls"
         if "fire_incidents" in path_lc or "incidents" in path_lc or "incident" in path_lc:
             return "fire_incidents"
-        return "fire_incidents"  # default conservativo
+        return "fire_incidents" 
 
     if has_inc:
         return "fire_incidents"

@@ -240,7 +240,7 @@ def ingest_bronze_incremental(run_id: str, pipeline_name: str = "phase2_incremen
                 [file_sha256],
             ).fetchone()[0]
 
-            # 8) INSERT idempotente (una sola volta!)
+            # 8) INSERT idempotente
             con.execute(
                 f"""
                 INSERT INTO {target}
